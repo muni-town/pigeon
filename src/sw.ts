@@ -1,5 +1,7 @@
 /// <reference lib="WebWorker" />
 
+import { handleRequest } from './matrix-shim';
+
 export type {};
 declare const self: ServiceWorkerGlobalScope;
 
@@ -28,25 +30,33 @@ function fetchConfig(token?: string): RequestInit | undefined {
 }
 
 self.addEventListener('activate', (event: ExtendableEvent) => {
-  event.waitUntil(clients.claim());
+  event.waitUntil(self.clients.claim());
 });
 
 self.addEventListener('fetch', (event: FetchEvent) => {
-  const { url, method } = event.request;
-  if (method !== 'GET') return;
-  if (
-    !url.includes('/_matrix/client/v1/media/download') &&
-    !url.includes('/_matrix/client/v1/media/thumbnail')
-  ) {
-    return;
+  const url = new URL(event.request.url);
+  if (url.pathname.startsWith('/_matrix')) {
+    event.respondWith(handleRequest(event.request));
   }
-  event.respondWith(
-    (async (): Promise<Response> => {
-      const client = await self.clients.get(event.clientId);
-      let token: string | undefined;
-      if (client) token = await askForAccessToken(client);
+  // const defaultHandler = () => {
+  //   const { url, method } = event.request;
+  //   if (method !== 'GET') return;
+  //   if (
+  //     !url.includes('/_matrix/client/v1/media/download') &&
+  //     !url.includes('/_matrix/client/v1/media/thumbnail')
+  //   ) {
+  //     return;
+  //   }
+  //   event.respondWith(
+  //     (async (): Promise<Response> => {
+  //       const client = await self.clients.get(event.clientId);
+  //       let token: string | undefined;
+  //       if (client) token = await askForAccessToken(client);
 
-      return fetch(url, fetchConfig(token));
-    })()
-  );
+  //       return fetch(url, fetchConfig(token));
+  //     })()
+  //   );
+  // };
+
+  // defaultHandler();
 });

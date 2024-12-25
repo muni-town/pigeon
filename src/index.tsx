@@ -28,7 +28,7 @@ if ('serviceWorker' in navigator) {
       ? `${trimTrailingSlash(import.meta.env.BASE_URL)}/sw.js`
       : `/dev-sw.js?dev-sw`;
 
-  navigator.serviceWorker.register(swUrl);
+  navigator.serviceWorker.register(swUrl, { type: import.meta.env.DEV ? 'module' : 'classic' });
   navigator.serviceWorker.addEventListener('message', (event) => {
     if (event.data?.type === 'token' && event.data?.responseKey) {
       // Get the token for SW.
