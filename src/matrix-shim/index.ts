@@ -7,11 +7,29 @@ import {
   atprotoLoopbackClientMetadata,
   buildLoopbackClientId,
 } from '@atproto/oauth-client-browser';
+import { Agent } from '@atproto/api';
+
+async function resolveHandle(did: string): Promise<string> {
+  const resp = await fetch(`https://plc.directory/${did}`);
+  const json = await resp.json();
+  const handleUri = json?.alsoKnownAs[0];
+  const handle = handleUri.split('at://')[1];
+  return handle;
+}
 
 const sessionId: string =
   Math.random().toString() + Math.random().toString() + Math.random().toString();
 
+let userHandle = '';
+let agent: Agent | undefined;
 let oauthSession: OAuthSession | undefined;
+
+async function setOauthSession(session: OAuthSession) {
+  oauthSession = session;
+  agent = new Agent(oauthSession);
+  userHandle = await resolveHandle(oauthSession.did);
+}
+
 let clientRedirectUrl = '';
 
 const redirectUri = 'http://127.0.0.1:8080/_matrix/custom/oauth/callback';
@@ -28,8 +46,8 @@ const oauthClient = new BrowserOAuthClient({
   allowHttp: true,
 });
 
-oauthClient.init().then((x) => {
-  oauthSession = x?.session;
+oauthClient.restore('https://bsky.social').then((x) => {
+  setOauthSession(x);
 });
 
 class Notifier {
@@ -59,7 +77,6 @@ class Notifier {
   }
 }
 
-let userId = '';
 const changes = new Notifier();
 
 const data: { rooms: IRooms } = {
@@ -79,11 +96,11 @@ const data: { rooms: IRooms } = {
           events: [
             {
               content: {
-                creator: '@zicklag:matrix.org',
+                creator: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
                 room_version: '10',
               },
               origin_server_ts: 1735057902140,
-              sender: '@zicklag:matrix.org',
+              sender: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
               state_key: '',
               type: 'm.room.create',
               event_id: '$7czg7NYYTIzxF-JtPeEkSJJGKnHkn_okjkevmxRA38I',
@@ -91,13 +108,11 @@ const data: { rooms: IRooms } = {
             },
             {
               content: {
-                avatar_url: 'mxc://matrix.org/lFKPRrfRnoJXMHiiNSLdfQPD',
-                displayname: 'Zicklag',
                 membership: 'join',
               },
               origin_server_ts: 1735057902636,
-              sender: '@zicklag:matrix.org',
-              state_key: '@zicklag:matrix.org',
+              sender: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
+              state_key: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
               type: 'm.room.member',
               event_id: '$WqODkAUHobazMKXy8x9SE33ww1ArJqJi_iDKxeX204I',
             },
@@ -106,7 +121,7 @@ const data: { rooms: IRooms } = {
                 name: 'test-matrix-room',
               },
               origin_server_ts: 1735057903889,
-              sender: '@zicklag:matrix.org',
+              sender: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
               state_key: '',
               type: 'm.room.name',
               event_id: '$4AYeUhoiOr1rFeYPOxNFRQhauGGNxd3OdSJAfhB_nQ8',
@@ -147,7 +162,8 @@ export async function handleRequest(request: Request): Promise<Response> {
   router.get('/_matrix/custom/oauth/callback', async ({ url }) => {
     const params = new URL(url).searchParams;
     const { session } = await oauthClient.callback(params);
-    oauthSession = session;
+    setOauthSession(session);
+
     const redirect = new URL(clientRedirectUrl);
     redirect.searchParams.append('loginToken', sessionId);
     return new Response(null, { status: 302, headers: [['location', redirect.href]] });
@@ -175,12 +191,11 @@ export async function handleRequest(request: Request): Promise<Response> {
   router.post('/_matrix/client/v3/login', withContent, ({ content }) => {
     if (!content) return error(400, 'Invalid login request');
     const req = content as ILoginParams;
-    userId = `@${(req.identifier as any)?.user || 'name'}:matrix.org`;
 
     return {
       access_token: sessionId,
       device_id: req.device_id || sessionId,
-      user_id: userId,
+      user_id: oauthSession?.did,
     };
   });
 
@@ -220,8 +235,8 @@ export async function handleRequest(request: Request): Promise<Response> {
 
   router.get('/_matrix/client/v3/voip/turnServer ', () => ({}));
 
-  router.get('/_matrix/client/v3/profile/:userId', ({ params }) => ({
-    displayName: params.userId.split(':')[0],
+  router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => ({
+    displayname: await resolveHandle(decodeURIComponent(params.userId)),
   }));
 
   router.get('/_matrix/client/v3/rooms/:roomId/members', ({ params }) => {
@@ -251,7 +266,7 @@ export async function handleRequest(request: Request): Promise<Response> {
       data.rooms.join[roomId].timeline.events.push({
         type: params.type,
         content,
-        sender: userId,
+        sender: userHandle,
         event_id: eventId,
         state_key: '',
         origin_server_ts: Date.now(),
