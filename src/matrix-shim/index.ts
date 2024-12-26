@@ -28,6 +28,10 @@ const oauthClient = new BrowserOAuthClient({
   allowHttp: true,
 });
 
+oauthClient.init().then((x) => {
+  oauthSession = x?.session;
+});
+
 class Notifier {
   resolve: () => void;
 
@@ -180,11 +184,19 @@ export async function handleRequest(request: Request): Promise<Response> {
     };
   });
 
+  //
+  // AUTH CHECK
+  //
+
   // All below this route require auth
   // eslint-disable-next-line consistent-return
   router.all('*', async () => {
     if (!oauthSession) {
-      return error(401, authFlows);
+      return error(401, {
+        errcode: 'M_UNKNOWN_TOKEN',
+        error: 'AtProto session expired',
+        soft_logout: true,
+      });
     }
   });
 
@@ -272,7 +284,12 @@ export async function handleRequest(request: Request): Promise<Response> {
         x.timeline.events.some((y) => y.origin_server_ts > since)
       )
     ) {
-      await changes.wait();
+      Promise.race([
+        await changes.wait(),
+        new Promise((resolve) => {
+          setTimeout(resolve, parseInt(query.timeout as string, 10) || 30000);
+        }),
+      ]);
     }
 
     Object.values(d.rooms.join).forEach((room) => {
