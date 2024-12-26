@@ -5,29 +5,29 @@ import { handleRequest } from './matrix-shim';
 export type {};
 declare const self: ServiceWorkerGlobalScope;
 
-async function askForAccessToken(client: Client): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const responseKey = Math.random().toString(36);
-    const listener = (event: ExtendableMessageEvent) => {
-      if (event.data.responseKey !== responseKey) return;
-      resolve(event.data.token);
-      self.removeEventListener('message', listener);
-    };
-    self.addEventListener('message', listener);
-    client.postMessage({ responseKey, type: 'token' });
-  });
-}
+// async function askForAccessToken(client: Client): Promise<string | undefined> {
+//   return new Promise((resolve) => {
+//     const responseKey = Math.random().toString(36);
+//     const listener = (event: ExtendableMessageEvent) => {
+//       if (event.data.responseKey !== responseKey) return;
+//       resolve(event.data.token);
+//       self.removeEventListener('message', listener);
+//     };
+//     self.addEventListener('message', listener);
+//     client.postMessage({ responseKey, type: 'token' });
+//   });
+// }
 
-function fetchConfig(token?: string): RequestInit | undefined {
-  if (!token) return undefined;
+// function fetchConfig(token?: string): RequestInit | undefined {
+//   if (!token) return undefined;
 
-  return {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    cache: 'default',
-  };
-}
+//   return {
+//     headers: {
+//       Authorization: `Bearer ${token}`,
+//     },
+//     cache: 'default',
+//   };
+// }
 
 self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(self.clients.claim());

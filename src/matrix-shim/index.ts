@@ -1,8 +1,32 @@
 import { AutoRouter, error, withContent } from 'itty-router';
 import { type IRooms, type ILoginParams } from 'matrix-js-sdk';
+import {
+  BrowserOAuthClient,
+  OAuthClientMetadataInput,
+  OAuthSession,
+  atprotoLoopbackClientMetadata,
+  buildLoopbackClientId,
+} from '@atproto/oauth-client-browser';
 
-const session: string =
+const sessionId: string =
   Math.random().toString() + Math.random().toString() + Math.random().toString();
+
+let oauthSession: OAuthSession | undefined;
+let clientRedirectUrl = '';
+
+const redirectUri = 'http://127.0.0.1:8080/_matrix/custom/oauth/callback';
+const metadata: OAuthClientMetadataInput = {
+  ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
+  redirect_uris: [redirectUri],
+  client_id: `http://localhost?redirect_uri=${encodeURIComponent(redirectUri)}`,
+};
+
+const oauthClient = new BrowserOAuthClient({
+  handleResolver: 'https://bsky.social',
+  clientMetadata: metadata,
+  responseMode: 'query',
+  allowHttp: true,
+});
 
 class Notifier {
   resolve: () => void;
@@ -109,35 +133,60 @@ export async function handleRequest(request: Request): Promise<Response> {
     versions: ['v1.13'],
   }));
 
-  router.get('/_matrix/client/v3/login', () => ({
+  router.get('/_matrix/login/sso/redirect', async ({ query }) => {
+    if (!query.redirectUrl) return error(400, 'missing required `redirectUrl` query parameter.');
+    clientRedirectUrl = query.redirectUrl as string;
+    const url = await oauthClient.authorize('https://bsky.social', { state: sessionId });
+    return new Response(null, { status: 302, headers: [['location', url.href]] });
+  });
+
+  router.get('/_matrix/custom/oauth/callback', async ({ url }) => {
+    const params = new URL(url).searchParams;
+    const { session } = await oauthClient.callback(params);
+    oauthSession = session;
+    const redirect = new URL(clientRedirectUrl);
+    redirect.searchParams.append('loginToken', sessionId);
+    return new Response(null, { status: 302, headers: [['location', redirect.href]] });
+  });
+
+  const authFlows = {
     flows: [
       {
-        type: 'm.login.password',
+        type: 'm.login.sso',
+        identity_providers: [
+          {
+            id: 'oauth-atproto',
+            name: 'BlueSky',
+            brand: 'bluesky',
+          },
+        ],
+      },
+      {
+        type: 'm.login.token',
       },
     ],
-    session,
-  }));
+    session: sessionId,
+  };
+  router.get('/_matrix/client/v3/login', () => authFlows);
   router.post('/_matrix/client/v3/login', withContent, ({ content }) => {
     if (!content) return error(400, 'Invalid login request');
     const req = content as ILoginParams;
     userId = `@${(req.identifier as any)?.user || 'name'}:matrix.org`;
 
     return {
-      access_token: session,
-      device_id: req.device_id || session,
+      access_token: sessionId,
+      device_id: req.device_id || sessionId,
       user_id: userId,
     };
   });
 
-  // if (content && content.auth) {
-  //   const { auth } = content;
-  //   if (auth.session !== session) return error(403, 'Invalid auth session');
-  //   if (auth.type !== 'm.login.password') return error(400, `Invalid auth type: ${auth.type}`);
-  //   if (auth.identifier.type !== 'm.id.user')
-  //     return error(400, `Invalid auth type: ${auth.type}`);
-
-  //   return auth.identifier.user;
-  // }
+  // All below this route require auth
+  // eslint-disable-next-line consistent-return
+  router.all('*', async () => {
+    if (!oauthSession) {
+      return error(401, authFlows);
+    }
+  });
 
   router.get('/_matrix/client/v3/pushrules/', () => []);
   router.get('/_matrix/client/v3/voip/turnServer', () => []);

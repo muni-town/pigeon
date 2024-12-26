@@ -1,8 +1,6 @@
 {
-  "defaultHomeserver": 2,
-  "homeserverList": [
-    "bsky.app"
-  ],
+  "defaultHomeserver": 0,
+  "homeserverList": ["localhost:8080"],
   "allowCustomHomeservers": true,
 
   "featuredCommunities": {

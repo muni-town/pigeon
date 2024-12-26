@@ -13,7 +13,8 @@ export function SSOLogin({ providers, redirectUrl, saveScreenSpace }: SSOLoginPr
   const baseUrl = discovery['m.homeserver'].base_url;
   const mx = useMemo(() => createClient({ baseUrl }), [baseUrl]);
 
-  const getSSOIdUrl = (ssoId?: string): string => mx.getSsoLoginUrl(redirectUrl, 'sso', ssoId);
+  const getSSOIdUrl = (ssoId?: string): string =>
+    `/_matrix/login/sso/redirect?redirectUrl=${redirectUrl}`;
 
   const withoutIcon = providers
     ? providers.find(
