@@ -21,6 +21,18 @@ import './app/i18n';
 document.body.classList.add(configClass, varsClass);
 settings.applyTheme();
 
+const mountApp = () => {
+  const rootContainer = document.getElementById('root');
+
+  if (rootContainer === null) {
+    console.error('Root container element not found!');
+    return;
+  }
+
+  const root = createRoot(rootContainer);
+  root.render(<App />);
+};
+
 // Register Service Worker
 if ('serviceWorker' in navigator) {
   const swUrl =
@@ -39,18 +51,7 @@ if ('serviceWorker' in navigator) {
       });
     }
   });
+  navigator.serviceWorker.ready.then(mountApp);
+} else {
+  mountApp();
 }
-
-const mountApp = () => {
-  const rootContainer = document.getElementById('root');
-
-  if (rootContainer === null) {
-    console.error('Root container element not found!');
-    return;
-  }
-
-  const root = createRoot(rootContainer);
-  root.render(<App />);
-};
-
-mountApp();
