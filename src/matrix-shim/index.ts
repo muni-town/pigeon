@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable max-classes-per-file */
 
 import { AutoRouter, AutoRouterType, error, IRequest, withContent } from 'itty-router';
@@ -10,6 +11,8 @@ import {
   buildLoopbackClientId,
 } from '@atproto/oauth-client-browser';
 import { Agent } from '@atproto/api';
+
+import { KVSIndexedDB, kvsIndexedDB } from '@kvs/indexeddb';
 
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
@@ -134,11 +137,20 @@ export class MatrixShim {
 
   router: AutoRouterType<IRequest, any[], any>;
 
-  private constructor(peer: earthstar.Peer, sessionId: string, oauthClient: BrowserOAuthClient) {
+  kvdb: KVSIndexedDB<{ did: string | undefined }>;
+
+  private constructor(
+    peer: earthstar.Peer,
+    sessionId: string,
+    oauthClient: BrowserOAuthClient,
+    kvdb: KVSIndexedDB<{ did: string | undefined }>
+  ) {
     this.peer = peer;
     this.sessionId = sessionId;
     this.oauthClient = oauthClient;
     this.changes = new Notifier();
+    this.kvdb = kvdb;
+
     const router = AutoRouter();
 
     router.get('/_matrix/client/versions', () => ({
@@ -319,7 +331,7 @@ export class MatrixShim {
     this.oauthSession = session;
     this.bskyAgent = new Agent(this.oauthSession);
     this.userHandle = await resolveHandle(this.oauthSession.did);
-    // localStorage.setItem('did', oauthSession.did);
+    this.kvdb.set('did', this.oauthSession.did);
   }
 
   static async init(): Promise<MatrixShim> {
@@ -345,7 +357,21 @@ export class MatrixShim {
       allowHttp: true,
     });
 
-    const shim = new MatrixShim(peer, sessionId, oauthClient);
+    const shim = new MatrixShim(
+      peer,
+      sessionId,
+      oauthClient,
+      await kvsIndexedDB({ name: 'matrix-shim', version: 1 })
+    );
+
+    // TODO: This does not work because the `.restore()` method requires localStorage which does not exist in service workers.
+    // Try to restore previous session
+    // const did = await shim.kvdb.get('did');
+    // if (did) {
+    //   oauthClient.restore(did).then((x) => {
+    //     shim.setOauthSession(x);
+    //   });
+    // }
 
     return shim;
   }
@@ -354,10 +380,3 @@ export class MatrixShim {
     return this.router.fetch(request);
   }
 }
-
-// const did = localStorage.getItem('did');
-// if (did) {
-//   oauthClient.restore(did).then((x) => {
-//     setOauthSession(x);
-//   });
-// }
