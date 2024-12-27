@@ -353,7 +353,7 @@ export class MatrixShim {
       Math.random().toString() + Math.random().toString() + Math.random().toString();
 
     const redirectUri = new URL(globalThis.location.href);
-    redirectUri.pathname = '/_matrix/custom/oauth/callback';
+    redirectUri.pathname = `/${clientConfig.hashRouter.basename}/_matrix/custom/oauth/callback`;
     let metadata: OAuthClientMetadataInput;
     if (clientConfig.oauthClientId) {
       const resp = await fetch(clientConfig.oauthClientId, {

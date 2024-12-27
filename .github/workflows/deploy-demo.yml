@@ -1,0 +1,81 @@
+name: Deploy Demo (dev)
+
+on:
+  push:
+    branches:
+      - dev
+
+# Allow this job to clone the repo and create a page deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build Demo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.0
+      - name: Setup node
+        uses: actions/setup-node@v4.0.4
+        with:
+          node-version: 20.12.2
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build app
+        env:
+          NODE_OPTIONS: '--max_old_space_size=4096'
+        run: npm run build
+      # TODO: figure out why this separate step is necessary
+      - run: |
+          cp -r public/* dist/public/
+          echo '{
+            "client_id": "https://zicklag.github.io/pigeon/oauth-client.json",
+            "client_name": "Localhost App",
+            "client_uri": "http://127.0.0.1:8080",
+            "logo_uri": "http://127.0.0.1:8080/public/favicon.ico",
+            "tos_uri": "https://gist.githubusercontent.com/zicklag/89bd0c2519757c6d6429390e5fcd222a#file-tos-md",
+            "policy_uri": "https://gist.githubusercontent.com/zicklag/89bd0c2519757c6d6429390e5fcd222a#file-policy-md",
+            "redirect_uris": ["http://127.0.0.1:8080/_matrix/custom/oauth/callback"],
+            "scope": "atproto",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "application_type": "web",
+            "dpop_bound_access_tokens": true
+          }' > dist/oauth-client.json
+          echo '{
+            "oauthClientId": "https://zicklag.github.io/pigeon/oauth-client.json",
+            "defaultHomeserver": 0,
+            "homeserverList": ["pigeon"],
+            "allowCustomHomeservers": false,
+
+            "featuredCommunities": {
+              "openAsDefault": false
+            },
+
+            "hashRouter": {
+              "enabled": false,
+              "basename": "/pigeon"
+            }
+          }' > dist/config.json
+      - name: Upload static files as artifact
+        id: deployment
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+  deploy:
+    needs: build
+    name: Deploy Demo
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4 
