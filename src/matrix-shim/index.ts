@@ -18,6 +18,9 @@ import { KVSIndexedDB, kvsIndexedDB } from '@kvs/indexeddb';
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
 
+/**
+ * Resolve a did to it's AtProto handle.
+ */
 async function resolveHandle(did: string): Promise<string> {
   const resp = await fetch(`https://plc.directory/${did}`);
   const json = await resp.json();
@@ -26,6 +29,9 @@ async function resolveHandle(did: string): Promise<string> {
   return handle;
 }
 
+/**
+ * Helper class that allows you to wait on the next notification and send notifications.
+ */
 class Notifier {
   resolve: () => void;
 
@@ -142,6 +148,70 @@ export class MatrixShim {
 
   kvdb: KVSIndexedDB<{ did: string | undefined }>;
 
+  /**
+   * Initialize the MatrixShim.
+   */
+  static async init(): Promise<MatrixShim> {
+    const clientconfigResp = await fetch('/config.json');
+    const clientConfig = await clientconfigResp.json();
+
+    const peer = new earthstar.Peer({
+      password: 'password',
+      runtime: new earthstar.RuntimeDriverUniversal(),
+      storage: new earthstarBrowser.StorageDriverIndexedDB(),
+    });
+
+    const sessionId: string =
+      Math.random().toString() + Math.random().toString() + Math.random().toString();
+
+    const redirectUri = new URL(globalThis.location.href);
+    redirectUri.pathname = `${clientConfig.hashRouter.basename}_matrix/custom/oauth/callback`;
+    let metadata: OAuthClientMetadataInput;
+    if (clientConfig.oauthClientId) {
+      const resp = await fetch(clientConfig.oauthClientId, {
+        headers: [['accept', 'application/json']],
+      });
+      metadata = await resp.json();
+    } else {
+      metadata = {
+        ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
+        redirect_uris: [redirectUri.href],
+        scope: 'atproto transition:generic',
+        client_id: `http://localhost?redirect_uri=${encodeURIComponent(
+          redirectUri.href
+        )}&scope=${encodeURIComponent('atproto transition:generic')}`,
+      };
+    }
+    const oauthClient = new BrowserOAuthClient({
+      handleResolver: 'https://bsky.social',
+      clientMetadata: metadata,
+      responseMode: 'query',
+      allowHttp: true,
+    });
+
+    const shim = new MatrixShim(
+      clientConfig,
+      peer,
+      sessionId,
+      oauthClient,
+      await kvsIndexedDB({ name: 'matrix-shim', version: 1 })
+    );
+
+    // TODO: This does not work because the `.restore()` method requires localStorage which does not exist in service workers.
+    // Try to restore previous session
+    // const did = await shim.kvdb.get('did');
+    // if (did) {
+    //   oauthClient.restore(did).then((x) => {
+    //     shim.setOauthSession(x);
+    //   });
+    // }
+
+    return shim;
+  }
+
+  /**
+   * Crate the MatrixShim object.
+   */
   private constructor(
     clientConfig: { [key: string]: any },
     peer: earthstar.Peer,
@@ -167,6 +237,7 @@ export class MatrixShim {
       this.clientRedirectUrl = query.redirectUrl as string;
       const url = await this.oauthClient.authorize('https://bsky.social', {
         state: this.sessionId,
+        scope: 'atproto transition:generic',
       });
       return new Response(null, { status: 302, headers: [['location', url.href]] });
     });
@@ -332,6 +403,9 @@ export class MatrixShim {
     this.router = router;
   }
 
+  /**
+   * Set the current oauth session.
+   */
   async setOauthSession(session: OAuthSession) {
     this.oauthSession = session;
     this.bskyAgent = new Agent(this.oauthSession);
@@ -339,61 +413,9 @@ export class MatrixShim {
     this.kvdb.set('did', this.oauthSession.did);
   }
 
-  static async init(): Promise<MatrixShim> {
-    const clientconfigResp = await fetch('/config.json');
-    const clientConfig = await clientconfigResp.json();
-
-    const peer = new earthstar.Peer({
-      password: 'password',
-      runtime: new earthstar.RuntimeDriverUniversal(),
-      storage: new earthstarBrowser.StorageDriverIndexedDB(),
-    });
-
-    const sessionId: string =
-      Math.random().toString() + Math.random().toString() + Math.random().toString();
-
-    const redirectUri = new URL(globalThis.location.href);
-    redirectUri.pathname = `${clientConfig.hashRouter.basename}/_matrix/custom/oauth/callback`;
-    let metadata: OAuthClientMetadataInput;
-    if (clientConfig.oauthClientId) {
-      const resp = await fetch(clientConfig.oauthClientId, {
-        headers: [['accept', 'application/json']],
-      });
-      metadata = await resp.json();
-    } else {
-      metadata = {
-        ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
-        redirect_uris: [redirectUri.href],
-        client_id: `http://localhost?redirect_uri=${encodeURIComponent(redirectUri.href)}`,
-      };
-    }
-    const oauthClient = new BrowserOAuthClient({
-      handleResolver: 'https://bsky.social',
-      clientMetadata: metadata,
-      responseMode: 'query',
-      allowHttp: true,
-    });
-
-    const shim = new MatrixShim(
-      clientConfig,
-      peer,
-      sessionId,
-      oauthClient,
-      await kvsIndexedDB({ name: 'matrix-shim', version: 1 })
-    );
-
-    // TODO: This does not work because the `.restore()` method requires localStorage which does not exist in service workers.
-    // Try to restore previous session
-    // const did = await shim.kvdb.get('did');
-    // if (did) {
-    //   oauthClient.restore(did).then((x) => {
-    //     shim.setOauthSession(x);
-    //   });
-    // }
-
-    return shim;
-  }
-
+  /**
+   * Handle a matrix API request.
+   */
   async handleRequest(request: Request): Promise<Response> {
     return this.router.fetch(request);
   }
