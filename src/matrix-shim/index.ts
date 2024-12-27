@@ -120,6 +120,8 @@ const data: { rooms: IRooms } = {
 };
 
 export class MatrixShim {
+  clientConfig: { [key: string]: any };
+
   peer: earthstar.Peer;
 
   sessionId: string;
@@ -141,11 +143,13 @@ export class MatrixShim {
   kvdb: KVSIndexedDB<{ did: string | undefined }>;
 
   private constructor(
+    clientConfig: { [key: string]: any },
     peer: earthstar.Peer,
     sessionId: string,
     oauthClient: BrowserOAuthClient,
     kvdb: KVSIndexedDB<{ did: string | undefined }>
   ) {
+    this.clientConfig = clientConfig;
     this.peer = peer;
     this.sessionId = sessionId;
     this.oauthClient = oauthClient;
@@ -336,6 +340,9 @@ export class MatrixShim {
   }
 
   static async init(): Promise<MatrixShim> {
+    const clientconfigResp = await fetch('/config.json');
+    const clientConfig = await clientconfigResp.json();
+
     const peer = new earthstar.Peer({
       password: 'password',
       runtime: new earthstar.RuntimeDriverUniversal(),
@@ -345,12 +352,21 @@ export class MatrixShim {
     const sessionId: string =
       Math.random().toString() + Math.random().toString() + Math.random().toString();
 
-    const redirectUri = 'http://127.0.0.1:8080/_matrix/custom/oauth/callback';
-    const metadata: OAuthClientMetadataInput = {
-      ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
-      redirect_uris: [redirectUri],
-      client_id: `http://localhost?redirect_uri=${encodeURIComponent(redirectUri)}`,
-    };
+    const redirectUri = new URL(globalThis.location.href);
+    redirectUri.pathname = '/_matrix/custom/oauth/callback';
+    let metadata: OAuthClientMetadataInput;
+    if (clientConfig.oauthClientId) {
+      const resp = await fetch(clientConfig.oauthClientId, {
+        headers: [['accept', 'application/json']],
+      });
+      metadata = await resp.json();
+    } else {
+      metadata = {
+        ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
+        redirect_uris: [redirectUri.href],
+        client_id: `http://localhost?redirect_uri=${encodeURIComponent(redirectUri.href)}`,
+      };
+    }
     const oauthClient = new BrowserOAuthClient({
       handleResolver: 'https://bsky.social',
       clientMetadata: metadata,
@@ -359,6 +375,7 @@ export class MatrixShim {
     });
 
     const shim = new MatrixShim(
+      clientConfig,
       peer,
       sessionId,
       oauthClient,
