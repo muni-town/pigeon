@@ -1,6 +1,6 @@
 /// <reference lib="WebWorker" />
 
-import { handleRequest } from './matrix-shim';
+import { MatrixShim } from './matrix-shim';
 
 export type {};
 declare const self: ServiceWorkerGlobalScope;
@@ -33,10 +33,13 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(self.clients.claim());
 });
 
-self.addEventListener('fetch', (event: FetchEvent) => {
+const matrixShim = MatrixShim.init();
+
+self.addEventListener('fetch', async (event: FetchEvent) => {
   const url = new URL(event.request.url);
   if (url.pathname.startsWith('/_matrix')) {
-    event.respondWith(handleRequest(event.request));
+    const shim = await matrixShim;
+    event.respondWith(shim.handleRequest(event.request));
   }
   // const defaultHandler = () => {
   //   const { url, method } = event.request;

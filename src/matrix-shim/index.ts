@@ -1,4 +1,6 @@
-import { AutoRouter, error, withContent } from 'itty-router';
+/* eslint-disable max-classes-per-file */
+
+import { AutoRouter, AutoRouterType, error, IRequest, withContent } from 'itty-router';
 import { type IRooms, type ILoginParams } from 'matrix-js-sdk';
 import {
   BrowserOAuthClient,
@@ -12,12 +14,6 @@ import { Agent } from '@atproto/api';
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
 
-const peer = new earthstar.Peer({
-  password: 'password',
-  runtime: new earthstar.RuntimeDriverUniversal(),
-  storage: new earthstarBrowser.StorageDriverIndexedDB(),
-});
-
 async function resolveHandle(did: string): Promise<string> {
   const resp = await fetch(`https://plc.directory/${did}`);
   const json = await resp.json();
@@ -25,43 +21,6 @@ async function resolveHandle(did: string): Promise<string> {
   const handle = handleUri.split('at://')[1];
   return handle;
 }
-
-const sessionId: string =
-  Math.random().toString() + Math.random().toString() + Math.random().toString();
-
-let userHandle = '';
-let bskyAgent: Agent | undefined;
-let oauthSession: OAuthSession | undefined;
-
-async function setOauthSession(session: OAuthSession) {
-  oauthSession = session;
-  bskyAgent = new Agent(oauthSession);
-  userHandle = await resolveHandle(oauthSession.did);
-  // localStorage.setItem('did', oauthSession.did);
-}
-
-let clientRedirectUrl = '';
-
-const redirectUri = 'http://127.0.0.1:8080/_matrix/custom/oauth/callback';
-const metadata: OAuthClientMetadataInput = {
-  ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
-  redirect_uris: [redirectUri],
-  client_id: `http://localhost?redirect_uri=${encodeURIComponent(redirectUri)}`,
-};
-
-const oauthClient = new BrowserOAuthClient({
-  handleResolver: 'https://bsky.social',
-  clientMetadata: metadata,
-  responseMode: 'query',
-  allowHttp: true,
-});
-
-// const did = localStorage.getItem('did');
-// if (did) {
-//   oauthClient.restore(did).then((x) => {
-//     setOauthSession(x);
-//   });
-// }
 
 class Notifier {
   resolve: () => void;
@@ -89,8 +48,6 @@ class Notifier {
     return this.promise;
   }
 }
-
-const changes = new Notifier();
 
 const data: { rooms: IRooms } = {
   rooms: {
@@ -158,177 +115,249 @@ const data: { rooms: IRooms } = {
   },
 };
 
-export async function handleRequest(request: Request): Promise<Response> {
-  const router = AutoRouter();
+export class MatrixShim {
+  peer: earthstar.Peer;
 
-  router.get('/_matrix/client/versions', () => ({
-    versions: ['v1.13'],
-  }));
+  sessionId: string;
 
-  router.get('/_matrix/login/sso/redirect', async ({ query }) => {
-    if (!query.redirectUrl) return error(400, 'missing required `redirectUrl` query parameter.');
-    clientRedirectUrl = query.redirectUrl as string;
-    const url = await oauthClient.authorize('https://bsky.social', { state: sessionId });
-    return new Response(null, { status: 302, headers: [['location', url.href]] });
-  });
+  oauthClient: BrowserOAuthClient;
 
-  router.get('/_matrix/custom/oauth/callback', async ({ url }) => {
-    const params = new URL(url).searchParams;
-    const { session } = await oauthClient.callback(params);
-    setOauthSession(session);
+  oauthSession: OAuthSession | undefined;
 
-    const redirect = new URL(clientRedirectUrl);
-    redirect.searchParams.append('loginToken', sessionId);
-    return new Response(null, { status: 302, headers: [['location', redirect.href]] });
-  });
+  bskyAgent: Agent | undefined;
 
-  const authFlows = {
-    flows: [
-      {
-        type: 'm.login.sso',
-        identity_providers: [
-          {
-            id: 'oauth-atproto',
-            name: 'BlueSky',
-            brand: 'bluesky',
-          },
-        ],
-      },
-      {
-        type: 'm.login.token',
-      },
-    ],
-    session: sessionId,
-  };
-  router.get('/_matrix/client/v3/login', () => authFlows);
-  router.post('/_matrix/client/v3/login', withContent, ({ content }) => {
-    if (!content) return error(400, 'Invalid login request');
-    const req = content as ILoginParams;
+  userHandle = '';
 
-    return {
-      access_token: sessionId,
-      device_id: req.device_id || sessionId,
-      user_id: oauthSession?.did,
-    };
-  });
+  clientRedirectUrl = '';
 
-  //
-  // AUTH CHECK
-  //
+  changes: Notifier;
 
-  // All below this route require auth
-  // eslint-disable-next-line consistent-return
-  router.all('*', async () => {
-    if (!oauthSession) {
-      return error(401, {
-        errcode: 'M_UNKNOWN_TOKEN',
-        error: 'AtProto session expired',
-        soft_logout: true,
+  router: AutoRouterType<IRequest, any[], any>;
+
+  private constructor(peer: earthstar.Peer, sessionId: string, oauthClient: BrowserOAuthClient) {
+    this.peer = peer;
+    this.sessionId = sessionId;
+    this.oauthClient = oauthClient;
+    this.changes = new Notifier();
+    const router = AutoRouter();
+
+    router.get('/_matrix/client/versions', () => ({
+      versions: ['v1.13'],
+    }));
+
+    router.get('/_matrix/login/sso/redirect', async ({ query }) => {
+      if (!query.redirectUrl) return error(400, 'missing required `redirectUrl` query parameter.');
+      this.clientRedirectUrl = query.redirectUrl as string;
+      const url = await this.oauthClient.authorize('https://bsky.social', {
+        state: this.sessionId,
       });
-    }
-  });
+      return new Response(null, { status: 302, headers: [['location', url.href]] });
+    });
 
-  router.get('/_matrix/client/v3/pushrules/', () => []);
-  router.get('/_matrix/client/v3/voip/turnServer', () => []);
-  router.get('/_matrix/client/v3/devices', () => []);
-  router.get('/_matrix/client/v3/room_keys/version', () => ({}));
-  router.get('/_matrix/media/v3/config', () => ({
-    'm.upload.size': 10 * 1024 * 1024,
-  }));
-  router.get('/_matrix/client/v3/capabilities', () => ({
-    capabilities: {},
-  }));
+    router.get('/_matrix/custom/oauth/callback', async ({ url }) => {
+      const params = new URL(url).searchParams;
+      const { session } = await this.oauthClient.callback(params);
+      this.setOauthSession(session);
 
-  router.post('/_matrix/client/v3/keys/query', () => ({}));
-  router.post('/_matrix/client/v3/keys/upload', () => ({}));
-  router.post('/_matrix/client/v3/user/:userId/filter', () => ({
-    filter_id: '1',
-  }));
-  router.get('/_matrix/client/v3/user/:userId/filter/:filterId', () => ({}));
+      const redirect = new URL(this.clientRedirectUrl);
+      redirect.searchParams.append('loginToken', this.sessionId);
+      return new Response(null, { status: 302, headers: [['location', redirect.href]] });
+    });
 
-  router.get('/_matrix/client/v3/voip/turnServer ', () => ({}));
-
-  router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => ({
-    displayname: await resolveHandle(decodeURIComponent(params.userId)),
-  }));
-
-  router.get('/_matrix/client/v3/rooms/:roomId/members', ({ params }) => {
-    const roomId = decodeURIComponent(params.roomId);
-    return {
-      chunk: data.rooms.join[roomId].state.events.filter((x) => x.type === 'm.room.member'),
+    const authFlows = {
+      flows: [
+        {
+          type: 'm.login.sso',
+          identity_providers: [
+            {
+              id: 'oauth-atproto',
+              name: 'BlueSky',
+              brand: 'bluesky',
+            },
+          ],
+        },
+        {
+          type: 'm.login.token',
+        },
+      ],
+      session: this.sessionId,
     };
-  });
-  router.get('/_matrix/client/v3/rooms/:roomId/messages', ({ params, query }) => {
-    const roomId = decodeURIComponent(params.roomId);
-    const events = [...data.rooms.join[roomId].timeline.events];
-    if (query.dir === 'b') events.reverse();
-    return {
-      chunk: events,
-      start: query.from || '0',
-    };
-  });
-
-  router.put('/_matrix/client/v3/rooms/:roomId/typing/:userId', () => ({}));
-
-  router.put(
-    '/_matrix/client/v3/rooms/:roomId/send/:type/:txnId',
-    withContent,
-    ({ params, content }) => {
-      const roomId = decodeURIComponent(params.roomId);
-      const eventId = crypto.randomUUID();
-      data.rooms.join[roomId].timeline.events.push({
-        type: params.type,
-        content,
-        sender: userHandle,
-        event_id: eventId,
-        state_key: '',
-        origin_server_ts: Date.now(),
-        room_id: roomId,
-      });
-
-      changes.notify();
+    router.get('/_matrix/client/v3/login', () => authFlows);
+    router.post('/_matrix/client/v3/login', withContent, ({ content }) => {
+      if (!content) return error(400, 'Invalid login request');
+      const req = content as ILoginParams;
 
       return {
-        event_id: eventId,
+        access_token: this.sessionId,
+        device_id: req.device_id || sessionId,
+        user_id: this.oauthSession?.did,
       };
-    }
-  );
+    });
 
-  router.get('/_matrix/client/v3/sync', async ({ query }) => {
-    if (!query.since) {
+    //
+    // AUTH CHECK
+    //
+
+    // All below this route require auth
+    // eslint-disable-next-line consistent-return
+    router.all('*', async () => {
+      if (!this.oauthSession) {
+        return error(401, {
+          errcode: 'M_UNKNOWN_TOKEN',
+          error: 'AtProto session expired',
+          soft_logout: true,
+        });
+      }
+    });
+
+    router.get('/_matrix/client/v3/pushrules/', () => []);
+    router.get('/_matrix/client/v3/voip/turnServer', () => []);
+    router.get('/_matrix/client/v3/devices', () => []);
+    router.get('/_matrix/client/v3/room_keys/version', () => ({}));
+    router.get('/_matrix/media/v3/config', () => ({
+      'm.upload.size': 10 * 1024 * 1024,
+    }));
+    router.get('/_matrix/client/v3/capabilities', () => ({
+      capabilities: {},
+    }));
+
+    router.post('/_matrix/client/v3/keys/query', () => ({}));
+    router.post('/_matrix/client/v3/keys/upload', () => ({}));
+    router.post('/_matrix/client/v3/user/:userId/filter', () => ({
+      filter_id: '1',
+    }));
+    router.get('/_matrix/client/v3/user/:userId/filter/:filterId', () => ({}));
+
+    router.get('/_matrix/client/v3/voip/turnServer ', () => ({}));
+
+    router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => ({
+      displayname: await resolveHandle(decodeURIComponent(params.userId)),
+    }));
+
+    router.get('/_matrix/client/v3/rooms/:roomId/members', ({ params }) => {
+      const roomId = decodeURIComponent(params.roomId);
+      return {
+        chunk: data.rooms.join[roomId].state.events.filter((x) => x.type === 'm.room.member'),
+      };
+    });
+    router.get('/_matrix/client/v3/rooms/:roomId/messages', ({ params, query }) => {
+      const roomId = decodeURIComponent(params.roomId);
+      const events = [...data.rooms.join[roomId].timeline.events];
+      if (query.dir === 'b') events.reverse();
+      return {
+        chunk: events,
+        start: query.from || '0',
+      };
+    });
+
+    router.put('/_matrix/client/v3/rooms/:roomId/typing/:userId', () => ({}));
+
+    router.put(
+      '/_matrix/client/v3/rooms/:roomId/send/:type/:txnId',
+      withContent,
+      ({ params, content }) => {
+        const roomId = decodeURIComponent(params.roomId);
+        const eventId = crypto.randomUUID();
+        data.rooms.join[roomId].timeline.events.push({
+          type: params.type,
+          content,
+          sender: this.userHandle,
+          event_id: eventId,
+          state_key: '',
+          origin_server_ts: Date.now(),
+          room_id: roomId,
+        });
+
+        this.changes.notify();
+
+        return {
+          event_id: eventId,
+        };
+      }
+    );
+
+    router.get('/_matrix/client/v3/sync', async ({ query }) => {
+      if (!query.since) {
+        return {
+          next_batch: Date.now(),
+          ...data,
+        };
+      }
+
+      const since = parseInt(query.since as string, 10);
+
+      const d = { ...data };
+
+      if (
+        query.timeout !== '0' &&
+        !Object.values(d.rooms.join).some((x) =>
+          x.timeline.events.some((y) => y.origin_server_ts > since)
+        )
+      ) {
+        Promise.race([
+          await this.changes.wait(),
+          new Promise((resolve) => {
+            setTimeout(resolve, parseInt(query.timeout as string, 10) || 30000);
+          }),
+        ]);
+      }
+
+      Object.values(d.rooms.join).forEach((room) => {
+        // eslint-disable-next-line no-param-reassign
+        room.timeline.events = room.timeline.events.filter((x) => x.origin_server_ts > since);
+      });
       return {
         next_batch: Date.now(),
-        ...data,
+        ...d,
       };
-    }
-
-    const since = parseInt(query.since as string, 10);
-
-    const d = { ...data };
-
-    if (
-      query.timeout !== '0' &&
-      !Object.values(d.rooms.join).some((x) =>
-        x.timeline.events.some((y) => y.origin_server_ts > since)
-      )
-    ) {
-      Promise.race([
-        await changes.wait(),
-        new Promise((resolve) => {
-          setTimeout(resolve, parseInt(query.timeout as string, 10) || 30000);
-        }),
-      ]);
-    }
-
-    Object.values(d.rooms.join).forEach((room) => {
-      // eslint-disable-next-line no-param-reassign
-      room.timeline.events = room.timeline.events.filter((x) => x.origin_server_ts > since);
     });
-    return {
-      next_batch: Date.now(),
-      ...d,
-    };
-  });
 
-  return router.fetch(request);
+    this.router = router;
+  }
+
+  async setOauthSession(session: OAuthSession) {
+    this.oauthSession = session;
+    this.bskyAgent = new Agent(this.oauthSession);
+    this.userHandle = await resolveHandle(this.oauthSession.did);
+    // localStorage.setItem('did', oauthSession.did);
+  }
+
+  static async init(): Promise<MatrixShim> {
+    const peer = new earthstar.Peer({
+      password: 'password',
+      runtime: new earthstar.RuntimeDriverUniversal(),
+      storage: new earthstarBrowser.StorageDriverIndexedDB(),
+    });
+
+    const sessionId: string =
+      Math.random().toString() + Math.random().toString() + Math.random().toString();
+
+    const redirectUri = 'http://127.0.0.1:8080/_matrix/custom/oauth/callback';
+    const metadata: OAuthClientMetadataInput = {
+      ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
+      redirect_uris: [redirectUri],
+      client_id: `http://localhost?redirect_uri=${encodeURIComponent(redirectUri)}`,
+    };
+    const oauthClient = new BrowserOAuthClient({
+      handleResolver: 'https://bsky.social',
+      clientMetadata: metadata,
+      responseMode: 'query',
+      allowHttp: true,
+    });
+
+    const shim = new MatrixShim(peer, sessionId, oauthClient);
+
+    return shim;
+  }
+
+  async handleRequest(request: Request): Promise<Response> {
+    return this.router.fetch(request);
+  }
 }
+
+// const did = localStorage.getItem('did');
+// if (did) {
+//   oauthClient.restore(did).then((x) => {
+//     setOauthSession(x);
+//   });
+// }
