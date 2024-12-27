@@ -7,12 +7,12 @@
     "allowJs": true,
     "strict": true,
     "esModuleInterop": true,
-    "moduleResolution": "Node",
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "outDir": "dist",
     "skipLibCheck": true,
     "lib": ["ES2016", "DOM"]
   },
-  "exclude": ["node_modules", "dist"],
+  "exclude": ["dist"],
   "include": ["src"]
 }

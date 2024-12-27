@@ -9,6 +9,15 @@ import {
 } from '@atproto/oauth-client-browser';
 import { Agent } from '@atproto/api';
 
+import * as earthstar from '@earthstar/earthstar';
+import * as earthstarBrowser from '@earthstar/earthstar/browser';
+
+const peer = new earthstar.Peer({
+  password: 'password',
+  runtime: new earthstar.RuntimeDriverUniversal(),
+  storage: new earthstarBrowser.StorageDriverIndexedDB(),
+});
+
 async function resolveHandle(did: string): Promise<string> {
   const resp = await fetch(`https://plc.directory/${did}`);
   const json = await resp.json();
@@ -21,13 +30,14 @@ const sessionId: string =
   Math.random().toString() + Math.random().toString() + Math.random().toString();
 
 let userHandle = '';
-let agent: Agent | undefined;
+let bskyAgent: Agent | undefined;
 let oauthSession: OAuthSession | undefined;
 
 async function setOauthSession(session: OAuthSession) {
   oauthSession = session;
-  agent = new Agent(oauthSession);
+  bskyAgent = new Agent(oauthSession);
   userHandle = await resolveHandle(oauthSession.did);
+  // localStorage.setItem('did', oauthSession.did);
 }
 
 let clientRedirectUrl = '';
@@ -46,9 +56,12 @@ const oauthClient = new BrowserOAuthClient({
   allowHttp: true,
 });
 
-oauthClient.restore('https://bsky.social').then((x) => {
-  setOauthSession(x);
-});
+// const did = localStorage.getItem('did');
+// if (did) {
+//   oauthClient.restore(did).then((x) => {
+//     setOauthSession(x);
+//   });
+// }
 
 class Notifier {
   resolve: () => void;

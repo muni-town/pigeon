@@ -14,7 +14,8 @@
     "check:eslint": "eslint src/*",
     "check:prettier": "prettier --check .",
     "fix:prettier": "prettier --write .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "patch-package"
   },
   "keywords": [],
   "author": "Ajay Bura",
@@ -26,6 +27,7 @@
     "@atproto/api": "0.13.23",
     "@atproto/oauth-client": "0.3.5",
     "@atproto/oauth-client-browser": "0.3.5",
+    "@earthstar/earthstar": "npm:@jsr/earthstar__earthstar@11.0.0-beta.7",
     "@fontsource/inter": "4.5.14",
     "@matrix-org/olm": "3.2.15",
     "@tanstack/react-query": "5.24.1",
@@ -107,6 +109,7 @@
     "eslint-plugin-jsx-a11y": "6.6.1",
     "eslint-plugin-react": "7.31.11",
     "eslint-plugin-react-hooks": "4.6.0",
+    "patch-package": "8.0.0",
     "prettier": "2.8.1",
     "sass": "1.56.2",
     "typescript": "4.9.4",
