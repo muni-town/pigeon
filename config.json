@@ -1,7 +1,7 @@
 {
   "defaultHomeserver": 0,
-  "homeserverList": ["localhost:8080"],
-  "allowCustomHomeservers": true,
+  "homeserverList": ["pigeon"],
+  "allowCustomHomeservers": false,
 
   "featuredCommunities": {
     "openAsDefault": false
