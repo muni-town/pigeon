@@ -29,8 +29,17 @@ declare const self: ServiceWorkerGlobalScope;
 //   };
 // }
 
-self.addEventListener('activate', (event: ExtendableEvent) => {
-  event.waitUntil(self.clients.claim());
+// Immediately activate new service workers.
+self.addEventListener('install', () => {
+  self.skipWaiting();
+});
+
+// Immediately force all active clients to switch to the new service worker.
+self.addEventListener('activate', () => {
+  // zicklag: I'm not sure what this `waitUntil` was for, but I'm removing it for now.
+  // event.waitUntil(self.clients.claim());
+
+  self.clients.claim()
 });
 
 const matrixShim = MatrixShim.init();
@@ -43,8 +52,8 @@ self.addEventListener('fetch', async (event: FetchEvent) => {
   // I'm not sure why this WASM binary is always resolved with a relative path,
   // but it would be good to fix that so that we don't need this anymore.
   if (url.pathname.endsWith('olm.wasm')) {
-    event.respondWith(fetch('/olm.wasm')) 
-    return
+    event.respondWith(fetch('/olm.wasm'));
+    return;
   }
 
   if (url.pathname.startsWith('/_matrix')) {
