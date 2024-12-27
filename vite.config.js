@@ -50,12 +50,13 @@ export default defineConfig({
   server: {
     port: 8080,
     host: true,
-    proxy: {
-      '^\\/.*?\\/olm\\.wasm$': {
-        target: 'http://localhost:8080',
-        rewrite: () => '/olm.wasm',
-      },
-    },
+    // Not needed after working the rewrite into the web worker.
+    // proxy: {
+    //   '^\\/.*?\\/olm\\.wasm$': {
+    //     target: 'http://localhost:8080',
+    //     rewrite: () => '/olm.wasm',
+    //   },
+    // },
   },
   plugins: [
     topLevelAwait({

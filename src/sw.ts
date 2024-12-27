@@ -37,6 +37,16 @@ const matrixShim = MatrixShim.init();
 
 self.addEventListener('fetch', async (event: FetchEvent) => {
   const url = new URL(event.request.url);
+
+  // TODO(@zicklag): This is a weird thing we are doing to replace the need
+  // for the nginx / fastly / etc. rewrite rules that were previously being used.
+  // I'm not sure why this WASM binary is always resolved with a relative path,
+  // but it would be good to fix that so that we don't need this anymore.
+  if (url.pathname.endsWith('olm.wasm')) {
+    event.respondWith(fetch('/olm.wasm')) 
+    return
+  }
+
   if (url.pathname.startsWith('/_matrix')) {
     const shim = await matrixShim;
     event.respondWith(shim.handleRequest(event.request));
