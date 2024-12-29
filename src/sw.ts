@@ -1,9 +1,50 @@
 /// <reference lib="WebWorker" />
 
+import { kvsIndexedDB } from '@kvs/indexeddb';
 import { MatrixShim } from './matrix-shim';
 
 export type {};
 declare const self: ServiceWorkerGlobalScope;
+
+// TODO: This might be a horrible local storage shim. I don't know how it handles multiple tabs
+// open.
+// Works for now... 🤞 We just need it so that the atproto/oauth-client-browser doesn't panic because
+// localStorage isn't defined.
+const localStorageShimStore = kvsIndexedDB<{ data: string }>({
+  name: 'localStorage-shim',
+  version: 1,
+});
+globalThis.localStorage = {
+  data: {} as { [key: string]: string },
+  persist() {
+    localStorageShimStore.then((s) => {
+      s.set('data', JSON.stringify(this.data));
+    });
+  },
+  clear() {
+    this.data = {};
+  },
+  getItem(s: string): string | null {
+    return this.data[s] || null;
+  },
+  key(idx: number): string | null {
+    return (Object.values(this.data)[idx] as string | undefined) || null;
+  },
+  get length(): number {
+    return Object.values(this.data).length;
+  },
+  removeItem(key: string) {
+    this.data[key] = undefined;
+    this.persist();
+  },
+  setItem(key: string, value: string) {
+    this.data[key] = value;
+    this.persist()
+  },
+};
+localStorageShimStore.then(async (s) => {
+  globalThis.localStorage.data = JSON.parse((await s.get('data')) || '{}');
+});
 
 // async function askForAccessToken(client: Client): Promise<string | undefined> {
 //   return new Promise((resolve) => {
