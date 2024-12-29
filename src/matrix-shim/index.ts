@@ -1,9 +1,11 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 /// <reference lib="WebWorker" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable max-classes-per-file */
 
 import { AutoRouter, AutoRouterType, error, IRequest, withContent } from 'itty-router';
 import { type IRooms, type ILoginParams } from 'matrix-js-sdk';
+import { edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import {
   BrowserOAuthClient,
   OAuthClientMetadataInput,
@@ -14,6 +16,7 @@ import {
 import { Agent } from '@atproto/api';
 
 import { KVSIndexedDB, kvsIndexedDB } from '@kvs/indexeddb';
+import nacl from 'tweetnacl';
 
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
@@ -125,6 +128,8 @@ const data: { rooms: IRooms } = {
   },
 };
 
+type Keypair = NonNullable<Awaited<ReturnType<earthstar.Peer['auth']['identityKeypair']>>>;
+
 export class MatrixShim {
   clientConfig: { [key: string]: any };
 
@@ -136,7 +141,7 @@ export class MatrixShim {
 
   oauthSession: OAuthSession | undefined;
 
-  bskyAgent: Agent | undefined;
+  agent: Agent | undefined;
 
   userHandle = '';
 
@@ -147,6 +152,8 @@ export class MatrixShim {
   router: AutoRouterType<IRequest, any[], any>;
 
   kvdb: KVSIndexedDB<{ did: string | undefined }>;
+
+  keypair: Keypair;
 
   /**
    * Initialize the MatrixShim.
@@ -189,12 +196,29 @@ export class MatrixShim {
       allowHttp: true,
     });
 
+    let keypair: Keypair | undefined;
+    // eslint-disable-next-line no-restricted-syntax
+    for await (const pair of peer.auth.identityKeypairs()) {
+      if (pair.publicKey.shortname === 'dflt') {
+        keypair = pair;
+        break;
+      }
+    }
+    if (!keypair) {
+      const key = await peer.auth.createIdentityKeypair('dflt');
+      if (key instanceof earthstar.EarthstarError) {
+        throw new Error(`Error creating default identity: ${key.message}`);
+      }
+      keypair = key;
+    }
+
     const shim = new MatrixShim(
       clientConfig,
       peer,
       sessionId,
       oauthClient,
-      await kvsIndexedDB({ name: 'matrix-shim', version: 1 })
+      await kvsIndexedDB({ name: 'matrix-shim', version: 1 }),
+      keypair
     );
 
     // TODO: This does not work because the `.restore()` method requires localStorage which does not exist in service workers.
@@ -217,7 +241,8 @@ export class MatrixShim {
     peer: earthstar.Peer,
     sessionId: string,
     oauthClient: BrowserOAuthClient,
-    kvdb: KVSIndexedDB<{ did: string | undefined }>
+    kvdb: KVSIndexedDB<{ did: string | undefined }>,
+    keypair: Keypair
   ) {
     this.clientConfig = clientConfig;
     this.peer = peer;
@@ -225,8 +250,54 @@ export class MatrixShim {
     this.oauthClient = oauthClient;
     this.changes = new Notifier();
     this.kvdb = kvdb;
+    this.keypair = keypair;
 
     const router = AutoRouter();
+
+    router.get('/_matrix/custom/authchecktest', () => {
+      const myDerived = {
+        publicKey: edwardsToMontgomeryPub(this.keypair.publicKey.underlying),
+        secretKey: edwardsToMontgomeryPriv(this.keypair.secretKey),
+      };
+      const other = nacl.sign.keyPair();
+      const otherDerived = {
+        publicKey: edwardsToMontgomeryPub(other.publicKey),
+        secretKey: edwardsToMontgomeryPriv(other.secretKey),
+      };
+      const myNonce = nacl.randomBytes(nacl.box.nonceLength);
+      const otherNonce = nacl.randomBytes(nacl.box.nonceLength);
+
+      const myMessage = new TextEncoder().encode('hello1');
+      const otherMessage = new TextEncoder().encode('hello2');
+
+      // First I send my authenticated message
+      const myEncrypted = nacl.box(myMessage, myNonce, otherDerived.publicKey, myDerived.secretKey);
+      // And they validate it
+      const otherValidated = nacl.box.open(
+        myEncrypted,
+        myNonce,
+        myDerived.publicKey,
+        otherDerived.secretKey
+      );
+
+      const otherEncrypted = nacl.box(
+        otherMessage,
+        otherNonce,
+        myDerived.publicKey,
+        otherDerived.secretKey
+      );
+      const myValidated = nacl.box.open(
+        otherEncrypted,
+        otherNonce,
+        otherDerived.publicKey,
+        myDerived.secretKey
+      );
+
+      return {
+        otherValidated: otherValidated && new TextDecoder().decode(otherValidated),
+        myValidated: myValidated && new TextDecoder().decode(myValidated),
+      };
+    });
 
     router.get('/_matrix/client/versions', () => ({
       versions: ['v1.13'],
@@ -408,7 +479,7 @@ export class MatrixShim {
    */
   async setOauthSession(session: OAuthSession) {
     this.oauthSession = session;
-    this.bskyAgent = new Agent(this.oauthSession);
+    this.agent = new Agent(this.oauthSession);
     this.userHandle = await resolveHandle(this.oauthSession.did);
     this.kvdb.set('did', this.oauthSession.did);
   }

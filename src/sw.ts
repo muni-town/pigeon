@@ -30,8 +30,14 @@ declare const self: ServiceWorkerGlobalScope;
 // }
 
 // Immediately activate new service workers.
-self.addEventListener('install', () => {
-  self.skipWaiting();
+self.addEventListener('install', async () => {
+  console.trace('Service worker installed, trying to skip waiting...');
+  await self.skipWaiting();
+  console.trace('Service worker done waiting');
+
+  // TODO: we may still end up waiting to update if we are currently in the middle of
+  // responding to a request in the old service worker. We need to add an abort controller
+  // so that we can kill all active requests
 });
 
 // Immediately force all active clients to switch to the new service worker.
@@ -39,7 +45,8 @@ self.addEventListener('activate', () => {
   // zicklag: I'm not sure what this `waitUntil` was for, but I'm removing it for now.
   // event.waitUntil(self.clients.claim());
 
-  self.clients.claim()
+  console.trace('Servie worker activated');
+  self.clients.claim();
 });
 
 const matrixShim = MatrixShim.init();
