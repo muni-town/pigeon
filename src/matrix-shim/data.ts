@@ -98,6 +98,7 @@ export class MatrixDataWrapper {
         membership: 'join',
         displayname: member.displayname,
         avatar_url: member.avatar_url,
+        is_direct: room.direct,
       },
       origin_server_ts: room.createdAt,
       sender: member.id,

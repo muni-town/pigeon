@@ -544,7 +544,7 @@ export class MatrixShim {
       }
 
       return {
-        account_data: this.data.accountDataDirect(this.oauthSession!.did),
+        account_data: { events: [this.data.accountDataDirect(this.oauthSession!.did)] },
         next_batch: Date.now().toString(),
         rooms,
       };
