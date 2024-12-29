@@ -2,7 +2,7 @@
 /* eslint-disable max-classes-per-file */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import _ from 'lodash';
-import { ICreateRoomOpts, IRoomEvent, IStateEvent } from 'matrix-js-sdk';
+import { IRoomEvent, IStateEvent } from 'matrix-js-sdk';
 
 type Message = {
   txId: string;
@@ -11,12 +11,14 @@ type Message = {
   message: string;
 };
 
+export type Member = { id: string; displayname?: string; avatar_url?: string };
+
 type Rooms = {
   [id: string]: {
     direct: boolean;
     name: string;
-    owner: { id: string; displayname?: string };
-    members: { id: string; displayname?: string }[];
+    owner: Member;
+    members: Member[];
     createdAt: number;
     messages: Message[];
   };
@@ -74,26 +76,12 @@ export class MatrixDataWrapper {
   }
 
   async createRoom(
-    owner: { id: string; displayname?: string },
-    opts: ICreateRoomOpts,
-    resolveDid: (did: string) => Promise<string | undefined>
+    owner: Member,
+    members: Member[],
+    name: string,
+    direct = false
   ): Promise<string> {
-    let name = 'New Room';
-    if (opts.name) name = opts.name;
-    if (!opts.name && opts.invite && opts.invite.length > 0) {
-      const handles = await Promise.all(opts.invite.map(resolveDid));
-      const zip = _.zip(opts.invite, handles) as [string, string | undefined][];
-      name = zip.map(([did, handle]) => handle || did).join(', ');
-    }
-
-    return this.data.createRoom(
-      owner,
-      await Promise.all(
-        (opts.invite || []).map(async (id) => ({ id, displayname: await resolveDid(id) }))
-      ),
-      name,
-      opts.is_direct || false
-    );
+    return this.data.createRoom(owner, members, name, direct);
   }
 
   roomIds(): string[] {
@@ -109,6 +97,7 @@ export class MatrixDataWrapper {
       content: {
         membership: 'join',
         displayname: member.displayname,
+        avatar_url: member.avatar_url,
       },
       origin_server_ts: room.createdAt,
       sender: member.id,

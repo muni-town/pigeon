@@ -4,8 +4,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable max-classes-per-file */
 
-import { AutoRouter, AutoRouterType, error, IRequest, withContent } from 'itty-router';
-import type { ILoginParams, IRoomEvent, IRooms } from 'matrix-js-sdk';
+import {
+  AutoRouter,
+  AutoRouterType,
+  error,
+  IRequest,
+  RequestHandler,
+  withContent,
+} from 'itty-router';
+import { ICreateRoomOpts, type ILoginParams, type IRoomEvent, type IRooms } from 'matrix-js-sdk';
 import { edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import {
   BrowserOAuthClient,
@@ -22,6 +29,8 @@ import nacl from 'tweetnacl';
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
 import { Peer as WebrtcPeer } from 'peerjs';
+import _ from 'lodash';
+
 import { MatrixDataWrapper } from './data';
 
 /**
@@ -39,9 +48,17 @@ async function resolveDid(did: string): Promise<string | undefined> {
     const handle = handleUri.split('at://')[1];
     handleCache[did] = handle;
     return handle;
-  } catch (_) {
+  } catch (_e) {
     // Ignore error
   }
+}
+
+/** Helper to convert a URL to a pigeon mxc:// url.
+ *
+ * All this does is base64 encode the URL as the media ID and add it to a pigeon.muni.town server.
+ */
+function urlToMxc(url: string) {
+  return `mxc://pigeon/${btoa(url)}`;
 }
 
 /**
@@ -318,7 +335,12 @@ export class MatrixShim {
       } else if (this.agent) {
         const resp = await this.agent.resolveHandle({ handle: c.search_term });
         if (resp.data.did) {
-          results.push({ user_id: resp.data.did, display_name: c.search_term });
+          const profile = await this.agent!.getProfile({ actor: resp.data.did });
+          results.push({
+            user_id: resp.data.did,
+            display_name: c.search_term,
+            avatar_url: profile?.data.avatar && urlToMxc(profile.data.avatar),
+          });
         }
       }
       this.changes.notify();
@@ -361,9 +383,28 @@ export class MatrixShim {
 
     router.get('/_matrix/client/v3/voip/turnServer ', () => ({}));
 
-    router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => ({
-      displayname: await resolveDid(decodeURIComponent(params.userId)),
-    }));
+    const getMedia: RequestHandler = async ({ params }) => {
+      if (params.serverName !== 'pigeon') {
+        return error(404, 'Server name must be `pigeon`.');
+      }
+      // For now the only media IDs we support are base64 encoded URLs to redirect to.
+      const url = atob(params.mediaId);
+      return new Response(null, { status: 307, headers: [['location', url]] });
+    };
+    router.get('/_matrix/media/v3/thumbnail/:serverName/:mediaId', getMedia);
+    router.get('/_matrix/media/v3/thumbnail/:serverName/:mediaId', getMedia);
+
+    router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => {
+      const did = decodeURIComponent(params.userId);
+      const handle = await resolveDid(did);
+      const profile = await this.agent?.getProfile({ actor: did });
+      const avatar = profile?.data.avatar;
+      const avatarUrl = avatar && urlToMxc(avatar);
+      return {
+        displayname: handle,
+        avatar_url: avatarUrl,
+      };
+    });
 
     router.get('/_matrix/client/v3/rooms/:roomId/members', ({ params }) => {
       const roomId = decodeURIComponent(params.roomId);
@@ -397,10 +438,22 @@ export class MatrixShim {
     });
 
     router.post('/_matrix/client/v3/createRoom', withContent, async ({ content }) => {
+      const data: ICreateRoomOpts = content;
+      const dids = [this.oauthSession!.did, ...(data.invite || [])];
+      const resp = await this.agent!.getProfiles({
+        actors: dids,
+      });
+      const [owner, ...members] = _.zip(dids, resp.data.profiles).map(([did, profile]) => ({
+        id: did!,
+        displayname: profile?.handle,
+        avatar_url: profile?.avatar && urlToMxc(profile.avatar),
+      }));
+
       const roomId = await this.data.createRoom(
-        { id: this.oauthSession!.did, displayname: await resolveDid(this.oauthSession!.did) },
-        content,
-        resolveDid
+        owner,
+        members,
+        members.map((x) => x.displayname).join(', '),
+        data.is_direct
       );
       this.changes.notify();
       return { room_id: roomId };
