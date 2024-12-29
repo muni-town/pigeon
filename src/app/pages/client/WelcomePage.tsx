@@ -15,17 +15,10 @@ export function WelcomePage() {
         <PageHeroSection>
           <PageHero
             icon={<img width="70" height="70" src={CinnySVG} alt="Cinny Logo" />}
-            title="Welcome to Cinny"
+            title="Welcome to Pigeon"
             subTitle={
               <span>
-                Yet another matrix client.{' '}
-                <a
-                  href="https://github.com/cinnyapp/cinny/releases"
-                  target="_blank"
-                  rel="noreferrer noopener"
-                >
-                  v4.2.3
-                </a>
+                A wildly experimental chat app for AtProto.
               </span>
             }
           >
@@ -33,7 +26,7 @@ export function WelcomePage() {
               <Box grow="Yes" style={{ maxWidth: toRem(300) }} direction="Column" gap="300">
                 <Button
                   as="a"
-                  href="https://github.com/cinnyapp/cinny"
+                  href="https://github.com/muni-town/pigeon"
                   target="_blank"
                   rel="noreferrer noopener"
                   before={<Icon size="200" src={Icons.Code} />}
@@ -42,7 +35,7 @@ export function WelcomePage() {
                     Source Code
                   </Text>
                 </Button>
-                <Button
+                {/* <Button
                   as="a"
                   href="https://cinny.in/#sponsor"
                   target="_blank"
@@ -53,7 +46,7 @@ export function WelcomePage() {
                   <Text as="span" size="B400" truncate>
                     Support
                   </Text>
-                </Button>
+                </Button> */}
               </Box>
             </Box>
           </PageHero>
