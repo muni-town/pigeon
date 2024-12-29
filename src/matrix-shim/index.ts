@@ -1,10 +1,11 @@
+/* eslint-disable no-restricted-syntax */
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /// <reference lib="WebWorker" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable max-classes-per-file */
 
 import { AutoRouter, AutoRouterType, error, IRequest, withContent } from 'itty-router';
-import { type IRooms, type ILoginParams } from 'matrix-js-sdk';
+import type { ILoginParams, IRoomEvent, IRooms } from 'matrix-js-sdk';
 import { edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import {
   BrowserOAuthClient,
@@ -20,16 +21,27 @@ import nacl from 'tweetnacl';
 
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
+import { Peer as WebrtcPeer } from 'peerjs';
+import { MatrixDataWrapper } from './data';
 
 /**
  * Resolve a did to it's AtProto handle.
  */
-async function resolveHandle(did: string): Promise<string> {
-  const resp = await fetch(`https://plc.directory/${did}`);
-  const json = await resp.json();
-  const handleUri = json?.alsoKnownAs[0];
-  const handle = handleUri.split('at://')[1];
-  return handle;
+// eslint-disable-next-line consistent-return
+const handleCache: { [did: string]: string } = {};
+// eslint-disable-next-line consistent-return
+async function resolveDid(did: string): Promise<string | undefined> {
+  if (handleCache[did]) return handleCache[did];
+  try {
+    const resp = await fetch(`https://plc.directory/${did}`);
+    const json = await resp.json();
+    const handleUri = json?.alsoKnownAs[0];
+    const handle = handleUri.split('at://')[1];
+    handleCache[did] = handle;
+    return handle;
+  } catch (_) {
+    // Ignore error
+  }
 }
 
 /**
@@ -42,7 +54,7 @@ class Notifier {
 
   constructor() {
     let resolve: () => void = () => {
-      /**/
+      // Do nothing
     };
     this.promise = new Promise((r) => {
       resolve = r;
@@ -57,91 +69,27 @@ class Notifier {
     });
   }
 
-  wait(): Promise<void> {
-    return this.promise;
+  async wait() {
+    await this.promise;
   }
 }
-
-const data: { rooms: IRooms } = {
-  rooms: {
-    invite: {},
-    knock: {},
-    leave: {},
-    join: {
-      '!OEOSqbsIkqLoDShXXD:matrix.org': {
-        ephemeral: {
-          events: [],
-        },
-        account_data: {
-          events: [],
-        },
-        state: {
-          events: [
-            {
-              content: {
-                creator: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
-                room_version: '10',
-              },
-              origin_server_ts: 1735057902140,
-              sender: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
-              state_key: '',
-              type: 'm.room.create',
-              event_id: '$7czg7NYYTIzxF-JtPeEkSJJGKnHkn_okjkevmxRA38I',
-              room_id: '!OEOSqbsIkqLoDShXXD:matrix.org',
-            },
-            {
-              content: {
-                membership: 'join',
-              },
-              origin_server_ts: 1735057902636,
-              sender: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
-              state_key: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
-              type: 'm.room.member',
-              event_id: '$WqODkAUHobazMKXy8x9SE33ww1ArJqJi_iDKxeX204I',
-            },
-            {
-              content: {
-                name: 'test-matrix-room',
-              },
-              origin_server_ts: 1735057903889,
-              sender: 'did:plc:ulg2bzgrgs7ddjjlmhtegk3v',
-              state_key: '',
-              type: 'm.room.name',
-              event_id: '$4AYeUhoiOr1rFeYPOxNFRQhauGGNxd3OdSJAfhB_nQ8',
-              room_id: '!OEOSqbsIkqLoDShXXD:matrix.org',
-            },
-          ],
-        },
-        timeline: {
-          events: [],
-          prev_batch: '0',
-        },
-        unread_notifications: {
-          notification_count: 0,
-          highlight_count: 0,
-        },
-        summary: {
-          'm.heroes': [],
-        },
-      },
-    },
-  },
-};
 
 type Keypair = NonNullable<Awaited<ReturnType<earthstar.Peer['auth']['identityKeypair']>>>;
 
 export class MatrixShim {
   clientConfig: { [key: string]: any };
 
-  peer: earthstar.Peer;
+  earthPeer: earthstar.Peer;
 
   sessionId: string;
 
   oauthClient: BrowserOAuthClient;
 
-  oauthSession: OAuthSession | undefined;
+  oauthSession?: OAuthSession;
 
-  agent: Agent | undefined;
+  agent?: Agent;
+
+  webrtcPeer?: WebrtcPeer;
 
   userHandle = '';
 
@@ -155,14 +103,18 @@ export class MatrixShim {
 
   keypair: Keypair;
 
+  data: MatrixDataWrapper = new MatrixDataWrapper();
+
   /**
    * Initialize the MatrixShim.
    */
   static async init(): Promise<MatrixShim> {
+    // Fetch the client Pigeon client configuration JSON
     const clientconfigResp = await fetch('/config.json');
     const clientConfig = await clientconfigResp.json();
 
-    const peer = new earthstar.Peer({
+    // Create a new earthstar peer
+    const earthPeer = new earthstar.Peer({
       password: 'password',
       runtime: new earthstar.RuntimeDriverUniversal(),
       storage: new earthstarBrowser.StorageDriverIndexedDB(),
@@ -198,14 +150,14 @@ export class MatrixShim {
 
     let keypair: Keypair | undefined;
     // eslint-disable-next-line no-restricted-syntax
-    for await (const pair of peer.auth.identityKeypairs()) {
+    for await (const pair of earthPeer.auth.identityKeypairs()) {
       if (pair.publicKey.shortname === 'dflt') {
         keypair = pair;
         break;
       }
     }
     if (!keypair) {
-      const key = await peer.auth.createIdentityKeypair('dflt');
+      const key = await earthPeer.auth.createIdentityKeypair('dflt');
       if (key instanceof earthstar.EarthstarError) {
         throw new Error(`Error creating default identity: ${key.message}`);
       }
@@ -214,21 +166,23 @@ export class MatrixShim {
 
     const shim = new MatrixShim(
       clientConfig,
-      peer,
+      earthPeer,
       sessionId,
       oauthClient,
       await kvsIndexedDB({ name: 'matrix-shim', version: 1 }),
       keypair
     );
 
-    // TODO: This does not work because the `.restore()` method requires localStorage which does not exist in service workers.
     // Try to restore previous session
-    // const did = await shim.kvdb.get('did');
-    // if (did) {
-    //   oauthClient.restore(did).then((x) => {
-    //     shim.setOauthSession(x);
-    //   });
-    // }
+    const did = await shim.kvdb.get('did');
+    if (did) {
+      oauthClient.restore(did).then((x) => {
+        shim.setOauthSession(x);
+      });
+    }
+
+    // Add to global scope for easier debugging in the browser console.
+    (globalThis as any).matrix = shim;
 
     return shim;
   }
@@ -238,14 +192,14 @@ export class MatrixShim {
    */
   private constructor(
     clientConfig: { [key: string]: any },
-    peer: earthstar.Peer,
+    earthPeer: earthstar.Peer,
     sessionId: string,
     oauthClient: BrowserOAuthClient,
     kvdb: KVSIndexedDB<{ did: string | undefined }>,
     keypair: Keypair
   ) {
     this.clientConfig = clientConfig;
-    this.peer = peer;
+    this.earthPeer = earthPeer;
     this.sessionId = sessionId;
     this.oauthClient = oauthClient;
     this.changes = new Notifier();
@@ -353,6 +307,24 @@ export class MatrixShim {
       };
     });
 
+    router.post('/_matrix/client/v3/user_directory/search', withContent, async ({ content }) => {
+      const c = content as { search_term: string };
+      const results = [];
+      if (c.search_term.startsWith('did:')) {
+        const handle = await resolveDid(c.search_term);
+        if (handle) {
+          results.push({ user_id: c.search_term, display_name: handle });
+        }
+      } else if (this.agent) {
+        const resp = await this.agent.resolveHandle({ handle: c.search_term });
+        if (resp.data.did) {
+          results.push({ user_id: resp.data.did, display_name: c.search_term });
+        }
+      }
+      this.changes.notify();
+      return { limited: false, results };
+    });
+
     //
     // AUTH CHECK
     //
@@ -390,43 +362,69 @@ export class MatrixShim {
     router.get('/_matrix/client/v3/voip/turnServer ', () => ({}));
 
     router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => ({
-      displayname: await resolveHandle(decodeURIComponent(params.userId)),
+      displayname: await resolveDid(decodeURIComponent(params.userId)),
     }));
 
     router.get('/_matrix/client/v3/rooms/:roomId/members', ({ params }) => {
       const roomId = decodeURIComponent(params.roomId);
       return {
-        chunk: data.rooms.join[roomId].state.events.filter((x) => x.type === 'm.room.member'),
+        chunk: this.data.roomState(roomId),
+      } as {
+        chunk: IRoomEvent[];
       };
     });
     router.get('/_matrix/client/v3/rooms/:roomId/messages', ({ params, query }) => {
       const roomId = decodeURIComponent(params.roomId);
-      const events = [...data.rooms.join[roomId].timeline.events];
-      if (query.dir === 'b') events.reverse();
-      return {
-        chunk: events,
-        start: query.from || '0',
-      };
+      return this.data.roomMessages(
+        roomId,
+        query.d === 'f' ? 'forward' : 'backward',
+        query.from?.toString(),
+        query.to?.toString(),
+        (query.limit && parseInt(query.limit.toString(), 10)) || undefined
+      );
+    });
+
+    router.put('/_matrix/client/v3/user/:userId/account_data/:type', withContent, async () =>
+      // this.data.setAccountData(params.userId, params.type, content);
+      ({})
+    );
+
+    router.get('/_matrix/client/v3/user/:userId/account_data/:type', async ({ params }) => {
+      if (params.type === 'm.direct') {
+        return this.data.accountDataDirect(params.userId);
+      }
+      return error(404);
+    });
+
+    router.post('/_matrix/client/v3/createRoom', withContent, async ({ content }) => {
+      const roomId = await this.data.createRoom(
+        { id: this.oauthSession!.did, displayname: await resolveDid(this.oauthSession!.did) },
+        content,
+        resolveDid
+      );
+      this.changes.notify();
+      return { room_id: roomId };
     });
 
     router.put('/_matrix/client/v3/rooms/:roomId/typing/:userId', () => ({}));
 
     router.put(
-      '/_matrix/client/v3/rooms/:roomId/send/:type/:txnId',
+      '/_matrix/client/v3/rooms/:roomId/send/:type/:txId',
       withContent,
       ({ params, content }) => {
         const roomId = decodeURIComponent(params.roomId);
-        const eventId = crypto.randomUUID();
-        data.rooms.join[roomId].timeline.events.push({
-          type: params.type,
-          content,
-          sender: this.userHandle,
-          event_id: eventId,
-          state_key: '',
-          origin_server_ts: Date.now(),
-          room_id: roomId,
-        });
 
+        // Ignore non-message events
+        if (params.type !== 'm.room.message') {
+          return { eventId: crypto.randomUUID() };
+        }
+
+        const eventId = this.data.roomSendMessage(
+          roomId,
+          this.oauthSession!.did,
+          params.txid,
+          content.body || '[unknown body]'
+        );
         this.changes.notify();
 
         return {
@@ -436,38 +434,66 @@ export class MatrixShim {
     );
 
     router.get('/_matrix/client/v3/sync', async ({ query }) => {
-      if (!query.since) {
-        return {
-          next_batch: Date.now(),
-          ...data,
-        };
+      const since = query.since?.toString() || '0';
+      const timeout = parseInt(query.timeout?.toString() || '0', 10);
+
+      const rooms: IRooms = {
+        invite: {},
+        join: {},
+        knock: {},
+        leave: {},
+      };
+
+      let exitNext = false;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        // Clear rooms
+        rooms.join = {};
+
+        for (const roomId of this.data.roomIds()) {
+          const messages = this.data.roomMessages(roomId, 'forward', since, undefined, 1e100);
+          // eslint-disable-next-line no-continue
+          if (!messages) continue;
+
+          if (
+            messages.chunk.length > 0 ||
+            this.data.rooms[roomId].createdAt > parseInt(since, 10)
+          ) {
+            rooms.join[roomId] = {
+              account_data: { events: [] },
+              ephemeral: { events: [] },
+              state: { events: messages.state },
+              summary: { 'm.heroes': [] },
+              timeline: { prev_batch: since, events: messages.chunk, limited: !!messages.end },
+              unread_notifications: {},
+            };
+          }
+        }
+
+        if (Object.keys(rooms.join).length > 0 || timeout === 0 || exitNext) {
+          break;
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await Promise.race([
+            (async () => {
+              await this.changes.wait();
+              return 'change';
+            })(),
+            new Promise((resolve) => {
+              setTimeout(() => {
+                resolve('timeout');
+              }, timeout);
+            }),
+          ]);
+
+          exitNext = true;
+        }
       }
 
-      const since = parseInt(query.since as string, 10);
-
-      const d = { ...data };
-
-      if (
-        query.timeout !== '0' &&
-        !Object.values(d.rooms.join).some((x) =>
-          x.timeline.events.some((y) => y.origin_server_ts > since)
-        )
-      ) {
-        Promise.race([
-          await this.changes.wait(),
-          new Promise((resolve) => {
-            setTimeout(resolve, parseInt(query.timeout as string, 10) || 30000);
-          }),
-        ]);
-      }
-
-      Object.values(d.rooms.join).forEach((room) => {
-        // eslint-disable-next-line no-param-reassign
-        room.timeline.events = room.timeline.events.filter((x) => x.origin_server_ts > since);
-      });
       return {
-        next_batch: Date.now(),
-        ...d,
+        account_data: this.data.accountDataDirect(this.oauthSession!.did),
+        next_batch: Date.now().toString(),
+        rooms,
       };
     });
 
@@ -480,8 +506,9 @@ export class MatrixShim {
   async setOauthSession(session: OAuthSession) {
     this.oauthSession = session;
     this.agent = new Agent(this.oauthSession);
-    this.userHandle = await resolveHandle(this.oauthSession.did);
+    this.userHandle = (await resolveDid(this.oauthSession.did)) || this.oauthSession.did;
     this.kvdb.set('did', this.oauthSession.did);
+    this.webrtcPeer = new WebrtcPeer(this.oauthSession.did);
   }
 
   /**
