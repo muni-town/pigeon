@@ -13,7 +13,7 @@ echo '{
   "tos_uri": "https://pigeon.muni.town",
   "policy_uri": "https://pigeon.muni.town",
   "redirect_uris": ["https://pigeon.muni.town/_matrix/custom/oauth/callback"],
-  "scope": "atproto",
+  "scope": "atproto transition:generic",
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none",
