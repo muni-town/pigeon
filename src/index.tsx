@@ -17,6 +17,7 @@ import App from './app/pages/App';
 
 // import i18n (needs to be bundled ;))
 import './app/i18n';
+import { PeerjsFrontendManager } from './matrix-shim/peerjsFrontend';
 
 document.body.classList.add(configClass, varsClass);
 settings.applyTheme();
@@ -33,6 +34,8 @@ const mountApp = () => {
   root.render(<App />);
 };
 
+(globalThis as any).peerManager = new PeerjsFrontendManager();
+
 // Register Service Worker
 if ('serviceWorker' in navigator) {
   const swUrl =
@@ -41,16 +44,6 @@ if ('serviceWorker' in navigator) {
       : `/dev-sw.js?dev-sw`;
 
   navigator.serviceWorker.register(swUrl, { type: import.meta.env.DEV ? 'module' : 'classic' });
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    if (event.data?.type === 'token' && event.data?.responseKey) {
-      // Get the token for SW.
-      const token = localStorage.getItem('cinny_access_token') ?? undefined;
-      event.source!.postMessage({
-        responseKey: event.data.responseKey,
-        token,
-      });
-    }
-  });
   navigator.serviceWorker.ready.then(mountApp);
 } else {
   mountApp();

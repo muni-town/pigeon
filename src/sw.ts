@@ -58,16 +58,19 @@ self.addEventListener('install', async () => {
   // so that we can kill all active requests
 });
 
+let matrixShim: MatrixShim | undefined;
+
 // Immediately force all active clients to switch to the new service worker.
-self.addEventListener('activate', () => {
+self.addEventListener('activate', async () => {
   // zicklag: I'm not sure what this `waitUntil` was for, but I'm removing it for now.
   // event.waitUntil(self.clients.claim());
 
   console.trace('Service worker activated');
+
+  matrixShim = await MatrixShim.init();
+
   self.clients.claim();
 });
-
-const matrixShim = MatrixShim.init();
 
 self.addEventListener('fetch', async (event: FetchEvent) => {
   const url = new URL(event.request.url);
@@ -82,6 +85,12 @@ self.addEventListener('fetch', async (event: FetchEvent) => {
   }
 
   if (url.pathname.startsWith('/_matrix')) {
+    if (!matrixShim) {
+      event.respondWith(
+        new Response(null, { status: 500, statusText: 'Service worker still starting' })
+      );
+      return;
+    }
     const shim = await matrixShim;
     event.respondWith(shim.handleRequest(event.request));
   }

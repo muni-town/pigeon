@@ -1,3 +1,4 @@
+/* eslint-disable no-await-in-loop */
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /// <reference lib="WebWorker" />
@@ -28,10 +29,11 @@ import nacl from 'tweetnacl';
 
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
-import { Peer as WebrtcPeer } from 'peerjs';
+import { DataConnection } from 'peerjs';
 import _ from 'lodash';
 
 import { MatrixDataWrapper } from './data';
+import { PeerjsConnectionManager } from './peerjsTransport';
 
 /**
  * Resolve a did to it's AtProto handle.
@@ -106,7 +108,9 @@ export class MatrixShim {
 
   agent?: Agent;
 
-  webrtcPeer?: WebrtcPeer;
+  connectionManager: PeerjsConnectionManager = new PeerjsConnectionManager();
+
+  webrtcPeerConns: { [did: string]: DataConnection } = {};
 
   userHandle = '';
 
@@ -204,6 +208,20 @@ export class MatrixShim {
     return shim;
   }
 
+  async setPeerIdRecordInPds() {
+    if (this.agent && this.oauthSession) {
+      await this.agent.com.atproto.repo.putRecord({
+        collection: 'peer.pigeon.muni.town',
+        record: {
+          $type: 'peer.pigeon.muni.town',
+          id: this.connectionManager.peerId,
+        },
+        repo: this.oauthSession.did,
+        rkey: 'self',
+      });
+    }
+  }
+
   /**
    * Crate the MatrixShim object.
    */
@@ -222,6 +240,10 @@ export class MatrixShim {
     this.changes = new Notifier();
     this.kvdb = kvdb;
     this.keypair = keypair;
+
+    this.connectionManager.openHandlers.push(() => {
+      this.setPeerIdRecordInPds();
+    });
 
     const router = AutoRouter();
 
@@ -561,7 +583,6 @@ export class MatrixShim {
     this.agent = new Agent(this.oauthSession);
     this.userHandle = (await resolveDid(this.oauthSession.did)) || this.oauthSession.did;
     this.kvdb.set('did', this.oauthSession.did);
-    this.webrtcPeer = new WebrtcPeer(this.oauthSession.did);
   }
 
   /**
