@@ -6,9 +6,9 @@ import { cryptoCallbacks } from './state/secretStorageKeys';
 
 global.Olm = Olm;
 
-if (import.meta.env.PROD) {
-  logger.disableAll();
-}
+// if (import.meta.env.PROD) {
+  logger.disableAll()
+// }
 
 type Session = {
   baseUrl: string;

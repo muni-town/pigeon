@@ -108,7 +108,7 @@ export class MatrixShim {
 
   agent?: Agent;
 
-  connectionManager: PeerjsConnectionManager = new PeerjsConnectionManager();
+  connectionManager: PeerjsConnectionManager;
 
   webrtcPeerConns: { [did: string]: DataConnection } = {};
 
@@ -241,9 +241,39 @@ export class MatrixShim {
     this.kvdb = kvdb;
     this.keypair = keypair;
 
-    this.connectionManager.openHandlers.push(() => {
-      this.setPeerIdRecordInPds();
+    // Whenever a peer is opened, set that PeerId as our current peer ID in our AtProto PDS.
+    this.connectionManager = new PeerjsConnectionManager({
+      peerOpenHandlers: [
+        () => {
+          this.setPeerIdRecordInPds();
+          this.connectToPeers();
+        },
+      ],
+      peerConnectHandlers: [
+        (transport) => {
+          (async () => {
+            for await (const message of transport) {
+              for (const roomId of this.data.roomIds()) {
+                const room = this.data.rooms[roomId];
+                if (room.direct) {
+                  if (this.oauthSession) {
+                    this.data.roomSendMessage(
+                      roomId,
+                      room.members[0].id,
+                      crypto.randomUUID(),
+                      new TextDecoder().decode(message)
+                    );
+                    this.changes.notify();
+                  }
+                }
+              }
+            }
+          })();
+        },
+      ],
     });
+
+    this.connectToPeers();
 
     const router = AutoRouter();
 
@@ -478,6 +508,7 @@ export class MatrixShim {
         data.is_direct
       );
       this.changes.notify();
+      this.connectToPeers();
       return { room_id: roomId };
     });
 
@@ -500,6 +531,11 @@ export class MatrixShim {
           params.txid,
           content.body || '[unknown body]'
         );
+
+        for (const transport of this.connectionManager.transports) {
+          transport.send(new TextEncoder().encode(content.body));
+        }
+
         this.changes.notify();
 
         return {
@@ -583,6 +619,68 @@ export class MatrixShim {
     this.agent = new Agent(this.oauthSession);
     this.userHandle = (await resolveDid(this.oauthSession.did)) || this.oauthSession.did;
     this.kvdb.set('did', this.oauthSession.did);
+    this.connectToPeers();
+  }
+
+  async getPeerIdForDid(did: string): Promise<string | undefined> {
+    if (this.agent && this.oauthSession) {
+      const record = await this.agent.com.atproto.repo.getRecord(
+        {
+          collection: 'peer.pigeon.muni.town',
+          repo: did,
+          rkey: 'self',
+        },
+        { headers: { 'atproto-proxy': `${did}#atproto_pds` } }
+      );
+
+      return (record.data.value as any)?.id;
+    }
+
+    return undefined;
+  }
+
+  /** Connect to all peers */
+  async connectToPeers() {
+    console.info('Connecting to peers');
+    const membersList: Set<string> = new Set();
+    for (const roomId of this.data.roomIds()) {
+      const room = this.data.rooms[roomId];
+      membersList.add(room.owner.id);
+      room.members.forEach((x) => membersList.add(x.id));
+    }
+    if (this.oauthSession) membersList.delete(this.oauthSession.did);
+
+    console.log('Peer dids:', membersList);
+
+    const ids = await Promise.all(
+      [...membersList.values()].map(async (x) => [x, await this.getPeerIdForDid(x)])
+    );
+    console.log('Peer ids:', ids);
+
+    for (const [did, peerId] of ids) {
+      if (peerId) {
+        console.info('Connecting to peer', peerId);
+        const transport = await this.connectionManager.connect(peerId);
+        (async () => {
+          for await (const message of transport) {
+            for (const roomId of this.data.roomIds()) {
+              const room = this.data.rooms[roomId];
+              if (room.direct && room.members.some((x) => x.id === did)) {
+                if (this.oauthSession) {
+                  this.data.roomSendMessage(
+                    roomId,
+                    did!,
+                    crypto.randomUUID(),
+                    new TextDecoder().decode(message)
+                  );
+                  this.changes.notify();
+                }
+              }
+            }
+          }
+        })();
+      }
+    }
   }
 
   /**

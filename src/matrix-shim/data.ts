@@ -1,7 +1,6 @@
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable max-classes-per-file */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import _ from 'lodash';
 import { IRoomEvent, IStateEvent } from 'matrix-js-sdk';
 
 type Message = {

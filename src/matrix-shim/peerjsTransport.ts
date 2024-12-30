@@ -95,6 +95,7 @@ export class PeerjsTransport implements Transport {
       if (data.type === 'connClosed' && data.connectionId === t.connId) {
         t.isClosed = true;
       } else if (data.type === 'connData' && data.connectionId === t.connId) {
+        console.info('Transport Recv', data.data);
         t.received.push(data.data as Uint8Array);
       }
     });
@@ -119,6 +120,7 @@ export class PeerjsTransport implements Transport {
   }
 
   async send(bytes: Uint8Array): Promise<void> {
+    console.info('Transport Send', bytes);
     const m: PeerjsBackendMessage = {
       type: 'sendData',
       connectionId: this.connId,
@@ -151,6 +153,8 @@ export class PeerjsTransport implements Transport {
 
 type ConnectHandler = (ev: PeerjsTransport) => unknown;
 
+type OpenCloseHandler = (peerId: string) => unknown;
+
 export class PeerjsConnectionManager {
   sender = new BroadcastChannel('matrix-shim-peerjs-backend');
 
@@ -160,46 +164,77 @@ export class PeerjsConnectionManager {
 
   transports: PeerjsTransport[] = [];
 
-  openHandlers: ((peerId: string) => unknown)[] = [];
+  peerOpenHandlers: OpenCloseHandler[] = [];
 
-  closeHandlers: ((peerId: string) => unknown)[] = [];
+  peerCloseHandlers: OpenCloseHandler[] = [];
 
-  connectHandlers: ConnectHandler[] = [];
+  peerConnectHandlers: ConnectHandler[] = [];
 
-  constructor() {
+  constructor(initialHandlers: {
+    peerOpenHandlers?: OpenCloseHandler[];
+    peerCloseHandlers?: OpenCloseHandler[];
+    peerConnectHandlers?: ConnectHandler[];
+  }) {
+    if (initialHandlers.peerCloseHandlers)
+      this.peerCloseHandlers = initialHandlers.peerCloseHandlers;
+    if (initialHandlers.peerOpenHandlers) this.peerOpenHandlers = initialHandlers.peerOpenHandlers;
+    if (initialHandlers.peerConnectHandlers)
+      this.peerConnectHandlers = initialHandlers.peerConnectHandlers;
+
     // Make sure the client sends us the peerOpened event.
     this.sender.postMessage({ type: 'getPeerId' } as PeerjsBackendMessage);
 
     this.receiver.addEventListener('message', (event) => {
       // eslint-disable-next-line prefer-destructuring
-      const data: PeerjsFrontendMessage = event.data;
+      const message: PeerjsFrontendMessage = event.data;
 
-      if (data.type === 'incomingConnected') {
-        PeerjsTransport.accept(data).then((transport) => {
+      // Add incoming connections to transport list
+      if (message.type === 'incomingConnected') {
+        PeerjsTransport.accept(message).then((transport) => {
+          console.info('Accepted peer connection from:', transport.remotePeerId);
           this.transports.push(transport);
 
-          for (const handler of this.connectHandlers) {
+          for (const handler of this.peerConnectHandlers) {
             handler(transport);
           }
         });
-      } else if (data.type === 'peerOpened') {
-        if (data.peerId !== this.peerId) {
-          this.peerId = data.peerId;
-          for (const handler of this.openHandlers) {
-            handler(data.peerId);
+
+        // Set current peer ID
+      } else if (message.type === 'peerOpened') {
+        console.info('Peer opened:', message.peerId);
+        if (message.peerId !== this.peerId) {
+          this.peerId = message.peerId;
+          for (const handler of this.peerOpenHandlers) {
+            handler(message.peerId);
           }
         }
-      } else if (data.type === 'peerClosed') {
-        for (const handler of this.closeHandlers) {
-          handler(data.peerId);
+
+        // Prune transports from closed peer
+      } else if (message.type === 'peerClosed') {
+        for (const handler of this.peerCloseHandlers) {
+          handler(message.peerId);
         }
         this.peerId = undefined;
+        this.transports = this.transports.filter(
+          (transport) => transport.peerId === message.peerId
+        );
+
+        // Prune closed connections
+      } else if (message.type === 'connClosed') {
+        this.transports = this.transports.filter(
+          (transport) => transport.connId !== message.connectionId
+        );
       }
     });
   }
 
   async connect(remotePeerId: string): Promise<PeerjsTransport> {
+    const existingTransport = this.transports.find((x) => x.remotePeerId === remotePeerId);
+    if (existingTransport) return existingTransport;
+
+    console.info('Trying to connect to remote peer:', remotePeerId);
     const transport = await PeerjsTransport.connect(remotePeerId);
+    console.info('Connection to peer opened:', remotePeerId);
     this.transports.push(transport);
     return transport;
   }

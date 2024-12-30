@@ -49,9 +49,9 @@ globalThis.localStorage = {
 
 // Immediately activate new service workers.
 self.addEventListener('install', async () => {
-  console.trace('Service worker installed, trying to skip waiting...');
+  console.info('Service worker installed, trying to skip waiting...');
   await self.skipWaiting();
-  console.trace('Service worker done waiting');
+  console.info('Service worker done waiting');
 
   // TODO: we may still end up waiting to update if we are currently in the middle of
   // responding to a request in the old service worker. We need to add an abort controller
@@ -65,7 +65,7 @@ self.addEventListener('activate', async () => {
   // zicklag: I'm not sure what this `waitUntil` was for, but I'm removing it for now.
   // event.waitUntil(self.clients.claim());
 
-  console.trace('Service worker activated');
+  console.info('Service worker activated');
 
   matrixShim = await MatrixShim.init();
 
