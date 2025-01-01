@@ -47,29 +47,67 @@ globalThis.localStorage = {
   globalThis.localStorage.data = JSON.parse((await s.get('data')) || '{}');
 });
 
+/** Create a channel that is used to communicate our readiness to the application. */
+const channel = new BroadcastChannel('service-worker-ready');
+
+/** The matrix shim after it has been loaded. */
+let matrixShim: MatrixShim | undefined;
+/** An error string if the matrix shim initialization failed */
+let matrixShimInitError: string | undefined;
+
+// When the app asks for our status, send a response
+channel.onmessage = (ev) => {
+  if (ev.data === 'ready?') {
+    if (matrixShim) {
+      channel.postMessage({ ready: true });
+    } else if (matrixShimInitError) {
+      channel.postMessage({ error: matrixShimInitError });
+    } else {
+      channel.postMessage({ loading: true });
+    }
+  }
+};
+
 // Immediately activate new service workers.
-self.addEventListener('install', async () => {
-  console.info('Service worker installed, trying to skip waiting...');
-  await self.skipWaiting();
-  console.info('Service worker done waiting');
+self.addEventListener('install', async (event) => {
+  console.info('Service worker installing...');
+
+  // Don't wait to install this service worker.
+  self.skipWaiting();
+
+  // Initialize the matrix shim before finishing install
+  event.waitUntil(
+    (async () => {
+      try {
+        // Start initializing the matrix shim.
+        const shim = await MatrixShim.init();
+        console.trace('init finished');
+        matrixShim = shim;
+        channel.postMessage({ ready: true });
+      } catch (e) {
+        console.trace('init errored');
+        matrixShimInitError = `${e}`;
+        channel.postMessage({ error: e });
+        throw e;
+      }
+    })()
+  );
+
+  console.info('Service worker done installing');
 
   // TODO: we may still end up waiting to update if we are currently in the middle of
   // responding to a request in the old service worker. We need to add an abort controller
-  // so that we can kill all active requests
+  // so that we can kill all active requests.
 });
 
-let matrixShim: MatrixShim | undefined;
-
 // Immediately force all active clients to switch to the new service worker.
-self.addEventListener('activate', async () => {
-  // zicklag: I'm not sure what this `waitUntil` was for, but I'm removing it for now.
-  // event.waitUntil(self.clients.claim());
+self.addEventListener('activate', async (event) => {
+  console.info('Activating service worker');
+
+  // Wait until we are certain we are receiving all client fetches.
+  event.waitUntil(self.clients.claim());
 
   console.info('Service worker activated');
-
-  matrixShim = await MatrixShim.init();
-
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', async (event: FetchEvent) => {
@@ -87,11 +125,10 @@ self.addEventListener('fetch', async (event: FetchEvent) => {
   if (url.pathname.startsWith('/_matrix')) {
     if (!matrixShim) {
       event.respondWith(
-        new Response(null, { status: 500, statusText: 'Service worker still starting' })
+        new Response(null, { status: 500, statusText: 'Matrix shim not ready yet' })
       );
       return;
     }
-    const shim = await matrixShim;
-    event.respondWith(shim.handleRequest(event.request));
+    event.respondWith(matrixShim.handleRequest(event.request));
   }
 });
