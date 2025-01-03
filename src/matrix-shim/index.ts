@@ -1,7 +1,8 @@
+/// <reference lib="WebWorker" />
+/* eslint-disable no-console */
 /* eslint-disable no-await-in-loop */
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-/// <reference lib="WebWorker" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable max-classes-per-file */
 
@@ -14,7 +15,6 @@ import {
   withContent,
 } from 'itty-router';
 import { ICreateRoomOpts, type ILoginParams, type IRoomEvent, type IRooms } from 'matrix-js-sdk';
-import { edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import {
   BrowserOAuthClient,
   OAuthClientMetadataInput,
@@ -23,77 +23,15 @@ import {
   buildLoopbackClientId,
 } from '@atproto/oauth-client-browser';
 import { Agent } from '@atproto/api';
-
 import { KVSIndexedDB, kvsIndexedDB } from '@kvs/indexeddb';
-import nacl from 'tweetnacl';
-
 import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
 import { DataConnection } from 'peerjs';
-import _ from 'lodash';
-
+import lexicons from './lexicon.json';
 import { MatrixDataWrapper } from './data';
 import { PeerjsConnectionManager } from './peerjsTransport';
-
-/**
- * Resolve a did to it's AtProto handle.
- */
-// eslint-disable-next-line consistent-return
-const handleCache: { [did: string]: string } = {};
-// eslint-disable-next-line consistent-return
-async function resolveDid(did: string): Promise<string | undefined> {
-  if (handleCache[did]) return handleCache[did];
-  try {
-    const resp = await fetch(`https://plc.directory/${did}`);
-    const json = await resp.json();
-    const handleUri = json?.alsoKnownAs[0];
-    const handle = handleUri.split('at://')[1];
-    handleCache[did] = handle;
-    return handle;
-  } catch (_e) {
-    // Ignore error
-  }
-}
-
-/** Helper to convert a URL to a pigeon mxc:// url.
- *
- * All this does is base64 encode the URL as the media ID and add it to a pigeon.muni.town server.
- */
-function urlToMxc(url: string) {
-  return `mxc://pigeon/${btoa(url)}`;
-}
-
-/**
- * Helper class that allows you to wait on the next notification and send notifications.
- */
-class Notifier {
-  resolve: () => void;
-
-  promise: Promise<void>;
-
-  constructor() {
-    let resolve: () => void = () => {
-      // Do nothing
-    };
-    this.promise = new Promise((r) => {
-      resolve = r;
-    });
-    this.resolve = resolve;
-  }
-
-  notify() {
-    this.resolve();
-    this.promise = new Promise((r) => {
-      this.resolve = r;
-    });
-  }
-
-  async wait() {
-    await this.promise;
-  }
-}
-
-type Keypair = NonNullable<Awaited<ReturnType<earthstar.Peer['auth']['identityKeypair']>>>;
+import { Notifier } from './notifier';
+import { resolveDidToHandle, urlToMxc } from './resolve';
 
 export class MatrixShim {
   clientConfig: { [key: string]: any };
@@ -104,9 +42,11 @@ export class MatrixShim {
 
   oauthClient: BrowserOAuthClient;
 
-  oauthSession?: OAuthSession;
-
-  agent?: Agent;
+  auth?: {
+    session: OAuthSession;
+    agent: Agent;
+    identity: earthstar.IdentityTag;
+  };
 
   connectionManager: PeerjsConnectionManager;
 
@@ -122,14 +62,14 @@ export class MatrixShim {
 
   kvdb: KVSIndexedDB<{ did: string | undefined }>;
 
-  keypair: Keypair;
-
-  data: MatrixDataWrapper = new MatrixDataWrapper();
+  data: MatrixDataWrapper;
 
   /**
    * Initialize the MatrixShim.
    */
   static async init(): Promise<MatrixShim> {
+    console.info('Initializing matrix shim');
+
     // Fetch the client Pigeon client configuration JSON
     const clientconfigResp = await fetch('/config.json');
     const clientConfig = await clientconfigResp.json();
@@ -156,10 +96,10 @@ export class MatrixShim {
       metadata = {
         ...atprotoLoopbackClientMetadata(buildLoopbackClientId(new URL('http://127.0.0.1:8080'))),
         redirect_uris: [redirectUri.href],
-        scope: 'atproto transition:generic',
+        scope: 'atproto transition:generic transition:chat.bsky',
         client_id: `http://localhost?redirect_uri=${encodeURIComponent(
           redirectUri.href
-        )}&scope=${encodeURIComponent('atproto transition:generic')}`,
+        )}&scope=${encodeURIComponent('atproto transition:generic transition:chat.bsky')}`,
       };
     }
     const oauthClient = new BrowserOAuthClient({
@@ -169,29 +109,12 @@ export class MatrixShim {
       allowHttp: true,
     });
 
-    let keypair: Keypair | undefined;
-    // eslint-disable-next-line no-restricted-syntax
-    for await (const pair of earthPeer.auth.identityKeypairs()) {
-      if (pair.publicKey.shortname === 'dflt') {
-        keypair = pair;
-        break;
-      }
-    }
-    if (!keypair) {
-      const key = await earthPeer.auth.createIdentityKeypair('dflt');
-      if (key instanceof earthstar.EarthstarError) {
-        throw new Error(`Error creating default identity: ${key.message}`);
-      }
-      keypair = key;
-    }
-
     const shim = new MatrixShim(
       clientConfig,
       earthPeer,
       sessionId,
       oauthClient,
-      await kvsIndexedDB({ name: 'matrix-shim', version: 1 }),
-      keypair
+      await kvsIndexedDB({ name: 'matrix-shim', version: 1 })
     );
 
     // Try to restore previous session
@@ -208,20 +131,6 @@ export class MatrixShim {
     return shim;
   }
 
-  async setPeerIdRecordInPds() {
-    if (this.agent && this.oauthSession) {
-      await this.agent.com.atproto.repo.putRecord({
-        collection: 'peer.pigeon.muni.town',
-        record: {
-          $type: 'peer.pigeon.muni.town',
-          id: this.connectionManager.peerId,
-        },
-        repo: this.oauthSession.did,
-        rkey: 'self',
-      });
-    }
-  }
-
   /**
    * Crate the MatrixShim object.
    */
@@ -230,16 +139,15 @@ export class MatrixShim {
     earthPeer: earthstar.Peer,
     sessionId: string,
     oauthClient: BrowserOAuthClient,
-    kvdb: KVSIndexedDB<{ did: string | undefined }>,
-    keypair: Keypair
+    kvdb: KVSIndexedDB<{ did: string | undefined }>
   ) {
     this.clientConfig = clientConfig;
     this.earthPeer = earthPeer;
     this.sessionId = sessionId;
     this.oauthClient = oauthClient;
-    this.changes = new Notifier();
+    this.changes = new Notifier('matrix');
     this.kvdb = kvdb;
-    this.keypair = keypair;
+    this.data = new MatrixDataWrapper(this);
 
     // Whenever a peer is opened, set that PeerId as our current peer ID in our AtProto PDS.
     this.connectionManager = new PeerjsConnectionManager({
@@ -250,77 +158,139 @@ export class MatrixShim {
         },
       ],
       peerConnectHandlers: [
-        (transport) => {
+        (_transport) => {
           (async () => {
-            for await (const message of transport) {
-              for (const roomId of this.data.roomIds()) {
-                const room = this.data.rooms[roomId];
-                if (room.direct) {
-                  if (this.oauthSession) {
-                    this.data.roomSendMessage(
-                      roomId,
-                      room.members[0].id,
-                      crypto.randomUUID(),
-                      new TextDecoder().decode(message)
-                    );
-                    this.changes.notify();
-                  }
-                }
-              }
-            }
+            // for await (const message of transport) {
+            //   for (const roomId of this.data.roomIds()) {
+            //     const room = this.data.rooms[roomId];
+            //     if (room.direct) {
+            //       if (this.auth) {
+            //         this.data.roomSendMessage(
+            //           roomId,
+            //           room.members[0].id,
+            //           crypto.randomUUID(),
+            //           new TextDecoder().decode(message)
+            //         );
+            //         this.changes.notify();
+            //       }
+            //     }
+            //   }
+            // }
           })();
         },
       ],
     });
 
+    this.router = this.buildRouter();
+
     this.connectToPeers();
+  }
 
-    const router = AutoRouter();
+  async setPeerIdRecordInPds() {
+    if (this.auth) {
+      await this.auth.agent.com.atproto.repo.putRecord({
+        collection: 'peer.pigeon.muni.town',
+        record: {
+          $type: 'peer.pigeon.muni.town',
+          id: this.connectionManager.peerId,
+        },
+        repo: this.auth.session.did,
+        rkey: 'self',
+      });
+    }
+  }
 
-    router.get('/_matrix/custom/authchecktest', () => {
-      const myDerived = {
-        publicKey: edwardsToMontgomeryPub(this.keypair.publicKey.underlying),
-        secretKey: edwardsToMontgomeryPriv(this.keypair.secretKey),
-      };
-      const other = nacl.sign.keyPair();
-      const otherDerived = {
-        publicKey: edwardsToMontgomeryPub(other.publicKey),
-        secretKey: edwardsToMontgomeryPriv(other.secretKey),
-      };
-      const myNonce = nacl.randomBytes(nacl.box.nonceLength);
-      const otherNonce = nacl.randomBytes(nacl.box.nonceLength);
+  /**
+   * Set the current oauth session.
+   */
+  async setOauthSession(session: OAuthSession) {
+    const oauthSession = session;
+    const agent = new Agent(oauthSession);
+    lexicons.forEach((l) => agent?.lex.add(l as any));
+    this.userHandle = (await resolveDidToHandle(oauthSession.did)) || oauthSession.did;
+    this.kvdb.set('did', oauthSession.did);
 
-      const myMessage = new TextEncoder().encode('hello1');
-      const otherMessage = new TextEncoder().encode('hello2');
-
-      // First I send my authenticated message
-      const myEncrypted = nacl.box(myMessage, myNonce, otherDerived.publicKey, myDerived.secretKey);
-      // And they validate it
-      const otherValidated = nacl.box.open(
-        myEncrypted,
-        myNonce,
-        myDerived.publicKey,
-        otherDerived.secretKey
-      );
-
-      const otherEncrypted = nacl.box(
-        otherMessage,
-        otherNonce,
-        myDerived.publicKey,
-        otherDerived.secretKey
-      );
-      const myValidated = nacl.box.open(
-        otherEncrypted,
-        otherNonce,
-        otherDerived.publicKey,
-        myDerived.secretKey
-      );
-
-      return {
-        otherValidated: otherValidated && new TextDecoder().decode(otherValidated),
-        myValidated: myValidated && new TextDecoder().decode(myValidated),
-      };
+    const resp = await agent.call('key.pigeon.muni.town', undefined, undefined, {
+      headers: {
+        'atproto-proxy': 'did:web:keyserver.pigeon.muni.town#pigeon_keyserver',
+      },
     });
+    this.earthPeer.addExistingIdentity({
+      tag: resp.data.publicKey,
+      secretKey: resp.data.secretKey,
+    });
+    const identity = resp.data.publicKey;
+
+    this.auth = {
+      agent,
+      identity,
+      session,
+    };
+
+    this.connectToPeers();
+  }
+
+  async getPeerIdForDid(did: string): Promise<string | undefined> {
+    if (this.auth) {
+      const record = await this.auth.agent.com.atproto.repo.getRecord(
+        {
+          collection: 'peer.pigeon.muni.town',
+          repo: did,
+          rkey: 'self',
+        },
+        { headers: { 'atproto-proxy': `${did}#atproto_pds` } }
+      );
+
+      return (record.data.value as any)?.id;
+    }
+
+    return undefined;
+  }
+
+  /** Connect to all peers */
+  async connectToPeers() {
+    // console.info('Connecting to peers');
+    // const membersList: Set<string> = new Set();
+    // for (const roomId of this.data.roomIds()) {
+    //   const room = this.data.rooms[roomId];
+    //   membersList.add(room.owner.id);
+    //   room.members.forEach((x) => membersList.add(x.id));
+    // }
+    // if (this.auth) membersList.delete(this.auth.session.did);
+    // console.log('Peer dids:', membersList);
+    // const ids = await Promise.all(
+    //   [...membersList.values()].map(async (x) => [x, await this.getPeerIdForDid(x)])
+    // );
+    // console.log('Peer ids:', ids);
+    // for (const [did, peerId] of ids) {
+    //   if (peerId) {
+    //     console.info('Connecting to peer', peerId);
+    //     const transport = await this.connectionManager.connect(peerId);
+    //     (async () => {
+    //       for await (const message of transport) {
+    //         for (const roomId of this.data.roomIds()) {
+    //           const room = this.data.rooms[roomId];
+    //           if (room.direct && room.members.some((x) => x.id === did)) {
+    //             if (this.auth) {
+    //               this.data.roomSendMessage(
+    //                 roomId,
+    //                 did!,
+    //                 crypto.randomUUID(),
+    //                 new TextDecoder().decode(message)
+    //               );
+    //               this.changes.notify();
+    //             }
+    //           }
+    //         }
+    //       }
+    //     })();
+    //   }
+    // }
+  }
+
+  /** Build the matrix API routes. */
+  buildRouter(): AutoRouterType {
+    const router = AutoRouter();
 
     router.get('/_matrix/client/versions', () => ({
       versions: ['v1.13'],
@@ -331,7 +301,7 @@ export class MatrixShim {
       this.clientRedirectUrl = query.redirectUrl as string;
       const url = await this.oauthClient.authorize('https://bsky.social', {
         state: this.sessionId,
-        scope: 'atproto transition:generic',
+        scope: 'atproto transition:generic transition:chat.bsky',
       });
       return new Response(null, { status: 302, headers: [['location', url.href]] });
     });
@@ -371,8 +341,8 @@ export class MatrixShim {
 
       return {
         access_token: this.sessionId,
-        device_id: req.device_id || sessionId,
-        user_id: this.oauthSession?.did,
+        device_id: req.device_id || this.sessionId,
+        user_id: this.auth?.session.did,
       };
     });
 
@@ -380,14 +350,14 @@ export class MatrixShim {
       const c = content as { search_term: string };
       const results = [];
       if (c.search_term.startsWith('did:')) {
-        const handle = await resolveDid(c.search_term);
+        const handle = await resolveDidToHandle(c.search_term);
         if (handle) {
           results.push({ user_id: c.search_term, display_name: handle });
         }
-      } else if (this.agent) {
-        const resp = await this.agent.resolveHandle({ handle: c.search_term });
+      } else if (this.auth) {
+        const resp = await this.auth.agent.resolveHandle({ handle: c.search_term });
         if (resp.data.did) {
-          const profile = await this.agent!.getProfile({ actor: resp.data.did });
+          const profile = await this.auth.agent!.getProfile({ actor: resp.data.did });
           results.push({
             user_id: resp.data.did,
             display_name: c.search_term,
@@ -406,7 +376,7 @@ export class MatrixShim {
     // All below this route require auth
     // eslint-disable-next-line consistent-return
     router.all('*', async () => {
-      if (!this.oauthSession) {
+      if (!this.auth) {
         return error(401, {
           errcode: 'M_UNKNOWN_TOKEN',
           error: 'AtProto session expired',
@@ -448,8 +418,8 @@ export class MatrixShim {
 
     router.get('/_matrix/client/v3/profile/:userId', async ({ params }) => {
       const did = decodeURIComponent(params.userId);
-      const handle = await resolveDid(did);
-      const profile = await this.agent?.getProfile({ actor: did });
+      const handle = await resolveDidToHandle(did);
+      const profile = await this.auth?.agent.getProfile({ actor: did });
       const avatar = profile?.data.avatar;
       const avatarUrl = avatar && urlToMxc(avatar);
       return {
@@ -458,10 +428,10 @@ export class MatrixShim {
       };
     });
 
-    router.get('/_matrix/client/v3/rooms/:roomId/members', ({ params }) => {
+    router.get('/_matrix/client/v3/rooms/:roomId/members', async ({ params }) => {
       const roomId = decodeURIComponent(params.roomId);
       return {
-        chunk: this.data.roomState(roomId),
+        chunk: await this.data.roomState(roomId),
       } as {
         chunk: IRoomEvent[];
       };
@@ -490,51 +460,24 @@ export class MatrixShim {
     });
 
     router.post('/_matrix/client/v3/createRoom', withContent, async ({ content }) => {
-      const data: ICreateRoomOpts = content;
-      const dids = [this.oauthSession!.did, ...(data.invite || [])];
-      const resp = await this.agent!.getProfiles({
-        actors: dids,
-      });
-      const [owner, ...members] = _.zip(dids, resp.data.profiles).map(([did, profile]) => ({
-        id: did!,
-        displayname: profile?.handle,
-        avatar_url: profile?.avatar && urlToMxc(profile.avatar),
-      }));
+      const opts: ICreateRoomOpts = content;
+      const roomId = await this.data.createRoom(opts);
 
-      const roomId = await this.data.createRoom(
-        owner,
-        members,
-        members.map((x) => x.displayname).join(', '),
-        data.is_direct
-      );
       this.changes.notify();
       this.connectToPeers();
       return { room_id: roomId };
     });
 
     router.put('/_matrix/client/v3/rooms/:roomId/typing/:userId', () => ({}));
+    router.post('/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId', () => ({}));
 
     router.put(
       '/_matrix/client/v3/rooms/:roomId/send/:type/:txId',
       withContent,
-      ({ params, content }) => {
+      async ({ params, content }) => {
         const roomId = decodeURIComponent(params.roomId);
 
-        // Ignore non-message events
-        if (params.type !== 'm.room.message') {
-          return { eventId: crypto.randomUUID() };
-        }
-
-        const eventId = this.data.roomSendMessage(
-          roomId,
-          this.oauthSession!.did,
-          params.txid,
-          content.body || '[unknown body]'
-        );
-
-        for (const transport of this.connectionManager.transports) {
-          transport.send(new TextEncoder().encode(content.body));
-        }
+        const eventId = await this.data.roomSendMessage(roomId, params.type, params.txid, content);
 
         this.changes.notify();
 
@@ -561,21 +504,17 @@ export class MatrixShim {
         // Clear rooms
         rooms.join = {};
 
-        for (const roomId of this.data.roomIds()) {
-          const messages = this.data.roomMessages(roomId, 'forward', since, undefined, 1e100);
+        for (const roomId of await this.earthPeer.shares()) {
+          const messages = await this.data.roomMessages(roomId, 'forward', since, undefined, 1e100);
           // eslint-disable-next-line no-continue
           if (!messages) continue;
-
-          if (
-            messages.chunk.length > 0 ||
-            this.data.rooms[roomId].createdAt > parseInt(since, 10)
-          ) {
+          if (messages.chunk.length > 0 || messages.roomCreatedAt > BigInt(since)) {
             rooms.join[roomId] = {
               account_data: { events: [] },
               ephemeral: { events: [] },
               state: { events: messages.state },
               summary: { 'm.heroes': [] },
-              timeline: { prev_batch: since, events: messages.chunk, limited: !!messages.end },
+              timeline: { prev_batch: since, events: messages.chunk },
               unread_notifications: {},
             };
           }
@@ -602,85 +541,13 @@ export class MatrixShim {
       }
 
       return {
-        account_data: { events: [this.data.accountDataDirect(this.oauthSession!.did)] },
+        account_data: { events: [] },
         next_batch: Date.now().toString(),
         rooms,
       };
     });
 
-    this.router = router;
-  }
-
-  /**
-   * Set the current oauth session.
-   */
-  async setOauthSession(session: OAuthSession) {
-    this.oauthSession = session;
-    this.agent = new Agent(this.oauthSession);
-    this.userHandle = (await resolveDid(this.oauthSession.did)) || this.oauthSession.did;
-    this.kvdb.set('did', this.oauthSession.did);
-    this.connectToPeers();
-  }
-
-  async getPeerIdForDid(did: string): Promise<string | undefined> {
-    if (this.agent && this.oauthSession) {
-      const record = await this.agent.com.atproto.repo.getRecord(
-        {
-          collection: 'peer.pigeon.muni.town',
-          repo: did,
-          rkey: 'self',
-        },
-        { headers: { 'atproto-proxy': `${did}#atproto_pds` } }
-      );
-
-      return (record.data.value as any)?.id;
-    }
-
-    return undefined;
-  }
-
-  /** Connect to all peers */
-  async connectToPeers() {
-    console.info('Connecting to peers');
-    const membersList: Set<string> = new Set();
-    for (const roomId of this.data.roomIds()) {
-      const room = this.data.rooms[roomId];
-      membersList.add(room.owner.id);
-      room.members.forEach((x) => membersList.add(x.id));
-    }
-    if (this.oauthSession) membersList.delete(this.oauthSession.did);
-
-    console.log('Peer dids:', membersList);
-
-    const ids = await Promise.all(
-      [...membersList.values()].map(async (x) => [x, await this.getPeerIdForDid(x)])
-    );
-    console.log('Peer ids:', ids);
-
-    for (const [did, peerId] of ids) {
-      if (peerId) {
-        console.info('Connecting to peer', peerId);
-        const transport = await this.connectionManager.connect(peerId);
-        (async () => {
-          for await (const message of transport) {
-            for (const roomId of this.data.roomIds()) {
-              const room = this.data.rooms[roomId];
-              if (room.direct && room.members.some((x) => x.id === did)) {
-                if (this.oauthSession) {
-                  this.data.roomSendMessage(
-                    roomId,
-                    did!,
-                    crypto.randomUUID(),
-                    new TextDecoder().decode(message)
-                  );
-                  this.changes.notify();
-                }
-              }
-            }
-          }
-        })();
-      }
-    }
+    return router;
   }
 
   /**

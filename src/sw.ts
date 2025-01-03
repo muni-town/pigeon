@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /// <reference lib="WebWorker" />
 
@@ -68,16 +69,10 @@ channel.onmessage = (ev) => {
   }
 };
 
-// Immediately activate new service workers.
-self.addEventListener('install', async (event) => {
-  console.info('Service worker installing...');
-
-  // Don't wait to install this service worker.
-  self.skipWaiting();
-
-  // Initialize the matrix shim before finishing install
-  event.waitUntil(
-    (async () => {
+let initializing: Promise<void> | undefined;
+const tryInitMatrix = async () => {
+  if (!initializing) {
+    initializing = (async () => {
       try {
         // Start initializing the matrix shim.
         const shim = await MatrixShim.init();
@@ -90,8 +85,17 @@ self.addEventListener('install', async (event) => {
         channel.postMessage({ error: e });
         throw e;
       }
-    })()
-  );
+    })();
+  }
+  await initializing;
+};
+
+// Immediately activate new service workers.
+self.addEventListener('install', async () => {
+  console.info('Service worker installing...');
+
+  // Don't wait to install this service worker.
+  self.skipWaiting();
 
   console.info('Service worker done installing');
 
@@ -106,6 +110,8 @@ self.addEventListener('activate', async (event) => {
 
   // Wait until we are certain we are receiving all client fetches.
   event.waitUntil(self.clients.claim());
+
+  tryInitMatrix();
 
   console.info('Service worker activated');
 });
@@ -123,12 +129,16 @@ self.addEventListener('fetch', async (event: FetchEvent) => {
   }
 
   if (url.pathname.startsWith('/_matrix')) {
-    if (!matrixShim) {
-      event.respondWith(
-        new Response(null, { status: 500, statusText: 'Matrix shim not ready yet' })
-      );
-      return;
-    }
-    event.respondWith(matrixShim.handleRequest(event.request));
+    event.respondWith(
+      (async () => {
+        if (!matrixShim) {
+          await tryInitMatrix();
+        }
+        if (!matrixShim) {
+          return new Response(null, { status: 500, statusText: 'Matrix not ready yet' });
+        }
+        return matrixShim.handleRequest(event.request);
+      })()
+    );
   }
 });

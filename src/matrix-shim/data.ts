@@ -1,236 +1,303 @@
+/* eslint-disable no-continue */
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
+/* eslint-disable no-console */
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable max-classes-per-file */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { IRoomEvent, IStateEvent } from 'matrix-js-sdk';
+import { ICreateRoomOpts, IRoomEvent, IStateEvent } from 'matrix-js-sdk';
 
-type Message = {
-  txId: string;
-  sender: string;
-  sentAt: number;
-  message: string;
+import * as earthstar from '@earthstar/earthstar';
+import _ from 'lodash';
+import { ulid } from 'ulidx';
+import { MatrixShim } from '.';
+import { resolvePublicKey, urlToMxc } from './resolve';
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+function encodeText(text: string): Uint8Array {
+  return textEncoder.encode(text);
+}
+function decodeText(binary: Uint8Array): string {
+  return textDecoder.decode(binary);
+}
+function encodeJson(data: any): Uint8Array {
+  return encodeText(JSON.stringify(data));
+}
+function decodeJson<T>(binary: Uint8Array): T {
+  return JSON.parse(decodeText(binary));
+}
+
+// type Message = {
+//   txId: string;
+//   sender: string;
+//   sentAt: number;
+//   message: string;
+// };
+
+// export type Member = { id: string; displayname?: string; avatar_url?: string };
+
+// type Rooms = {
+//   [id: string]: {
+//     direct: boolean;
+//     name: string;
+//     owner: Member;
+//     members: Member[];
+//     createdAt: number;
+//     messages: Message[];
+//   };
+// };
+
+export type RoomInfo = {
+  $type: 'town.muni.pigeon.room';
 };
-
-export type Member = { id: string; displayname?: string; avatar_url?: string };
-
-type Rooms = {
-  [id: string]: {
-    direct: boolean;
-    name: string;
-    owner: Member;
-    members: Member[];
-    createdAt: number;
-    messages: Message[];
-  };
-};
-
-export class Data {
-  rooms: Rooms = {};
-
-  constructor() {
-    this.rooms = JSON.parse(localStorage.getItem('matrix-shim-rooms') || '{}');
-  }
-
-  save() {
-    localStorage.setItem('matrix-shim-rooms', JSON.stringify(this.rooms));
-  }
-
-  createRoom(
-    owner: { id: string; displayname?: string },
-    members: { id: string; displayname?: string }[],
-    name: string,
-    direct: boolean
-  ): string {
-    const id = `!${crypto.randomUUID()}:pigeon`;
-    this.rooms[id] = {
-      direct,
-      createdAt: Date.now(),
-      name,
-      owner,
-      members,
-      messages: [],
-    };
-    this.save();
-    return id;
-  }
-}
-
-function roomMemberEventId(roomId: string, memberId: string, timestamp: number): string {
-  return `m.room.member-${roomId}-${memberId}-${timestamp}`;
-}
-
-function roomMessageEventId(
-  roomId: string,
-  sender: string,
-  txid: string,
-  timestamp: number
-): string {
-  return `m.room.message-${roomId}-${sender}-${txid}-${timestamp}`;
-}
+export type ShareInfo = RoomInfo;
 
 export class MatrixDataWrapper {
-  data: Data = new Data();
+  m: MatrixShim;
 
-  get rooms(): Rooms {
-    return this.data.rooms;
+  constructor(m: MatrixShim) {
+    this.m = m;
   }
 
-  async createRoom(
-    owner: Member,
-    members: Member[],
-    name: string,
-    direct = false
+  async createRoom(opts: ICreateRoomOpts): Promise<string> {
+    if (!this.m.auth) throw new Error('Not logged in');
+
+    // Get the list of members and their metadata
+    const dids = [this.m.auth.session.did, ...(opts.invite || [])];
+    const resp = await this.m.auth.agent.getProfiles({
+      actors: dids,
+    });
+    let members = (
+      await Promise.all(
+        _.zip(dids, resp.data.profiles).map(async ([did, profile]) => ({
+          id: did!,
+          displayname: profile?.handle,
+          avatar_url: profile?.avatar && urlToMxc(profile.avatar),
+          'town.muni.pigeon.publicKey': (await resolvePublicKey(did!))!,
+        }))
+      )
+    ).filter((x) => {
+      if (!x['town.muni.pigeon.publicKey']) {
+        console.warn(`Could not resolve public key for ${x.id}. Not adding to room members.`);
+        return false;
+      }
+      return true;
+    });
+
+    // Create a share for the room
+    const share = await this.m.earthPeer.createShare('room', false);
+    if (earthstar.isErr(share)) throw share;
+
+    // Mint capability for all room members ( for now all members have full write access )
+    members = await Promise.all(
+      members.map(async (member) => {
+        const cap = await this.m.earthPeer.mintCap(
+          share.tag,
+          member['town.muni.pigeon.publicKey'],
+          'write'
+        );
+        if (earthstar.isErr(cap)) throw cap;
+        return { ...member };
+      })
+    );
+
+    // Get the room store
+    const store = await this.m.earthPeer.getStore(share.tag);
+    if (earthstar.isErr(store)) throw store;
+
+    // Create a record marking this as a pigeon room
+    await store.set({
+      identity: this.m.auth.identity,
+      path: earthstar.Path.fromStrings('self'),
+      payload: encodeJson({ $type: 'town.muni.pigeon.room' } as ShareInfo),
+      timestamp: BigInt(Date.now()),
+    });
+
+    // Create the room create state event
+    await store.set({
+      identity: this.m.auth.identity,
+      path: earthstar.Path.fromStrings('events', 'state', ulid()),
+      timestamp: BigInt(Date.now()),
+      payload: encodeJson({
+        event_id: ulid(),
+        type: 'm.room.create',
+        content: {
+          creator: this.m.auth.session.did,
+        },
+        state_key: '',
+        origin_server_ts: Date.now(),
+        sender: this.m.auth.session.did,
+      } as IStateEvent),
+    });
+
+    // Add join events for all the members
+    for (const member of members) {
+      // eslint-disable-next-line no-await-in-loop
+      await store.set({
+        identity: this.m.auth.identity,
+        path: earthstar.Path.fromStrings('events', 'state', ulid()),
+        timestamp: BigInt(Date.now()),
+        payload: encodeJson({
+          event_id: ulid(),
+          type: 'm.room.member',
+          content: {
+            membership: 'join',
+            avatar_url: member.avatar_url,
+            displayname: member.displayname,
+          },
+          state_key: member.id,
+          origin_server_ts: Date.now(),
+          sender: member.id,
+        } as IStateEvent),
+      });
+    }
+
+    // Set the room name
+    await store.set({
+      identity: this.m.auth.identity,
+      path: earthstar.Path.fromStrings('events', 'state', ulid()),
+      timestamp: BigInt(Date.now()),
+      payload: encodeJson({
+        event_id: ulid(),
+        type: 'm.room.name',
+        content: {
+          name:
+            opts.name ||
+            opts.room_alias_name ||
+            (opts.is_direct &&
+              members
+                .slice(1)
+                .map((x) => x.displayname)
+                .filter((x) => !!x)
+                .join(', ')) ||
+            'New Room',
+        },
+        state_key: '',
+        origin_server_ts: Date.now(),
+        sender: this.m.auth.session.did,
+      } as IStateEvent),
+    });
+
+    return share.tag;
+  }
+
+  async roomState(roomId: string): Promise<IStateEvent[]> {
+    const store = await this.m.earthPeer.getStore(roomId);
+    if (earthstar.isErr(store)) return [];
+
+    const events: IStateEvent[] = [];
+
+    const docs = store.queryDocs({
+      pathPrefix: earthstar.Path.fromStrings('events', 'state'),
+      order: 'timestamp',
+    });
+    for await (const doc of docs) {
+      const data = doc.payload;
+      if (!data) continue;
+      events.push(decodeJson(await data.bytes(0)));
+    }
+
+    return events;
+  }
+
+  async roomSendMessage(
+    roomId: string,
+    type: string,
+    _txId: string,
+    content: any
   ): Promise<string> {
-    return this.data.createRoom(owner, members, name, direct);
-  }
+    if (!this.m.auth) throw new Error('Not logged in');
+    const store = await this.m.earthPeer.getStore(roomId);
+    if (earthstar.isErr(store)) throw store;
 
-  roomIds(): string[] {
-    return Object.keys(this.data.rooms);
-  }
-
-  roomState(roomId: string): IStateEvent[] {
-    const room = this.data.rooms[roomId];
-
-    const state = [room.owner, ...room.members].map((member) => ({
-      type: 'm.room.member',
-      event_id: roomMemberEventId(roomId, member.id, room.createdAt),
-      content: {
-        membership: 'join',
-        displayname: member.displayname,
-        avatar_url: member.avatar_url,
-        is_direct: room.direct,
-      },
-      origin_server_ts: room.createdAt,
-      sender: member.id,
-      state_key: member.id,
-    }));
-
-    state.push({
-      type: 'm.room.name',
-      event_id: `m.room.name-${roomId}-${room.createdAt}`,
-      content: {
-        name: room.name,
-      } as any,
-      origin_server_ts: room.createdAt,
-      sender: room.owner.id,
-      state_key: '',
+    const eventId = ulid();
+    const status = await store.set({
+      identity: this.m.auth.identity,
+      path: earthstar.Path.fromStrings('events', 'timeline', eventId),
+      timestamp: BigInt(Date.now()),
+      payload: encodeJson({
+        type,
+        event_id: eventId,
+        origin_server_ts: Date.now(),
+        sender: this.m.auth.session.did,
+        content,
+      }),
     });
 
-    return state;
+    if (status.kind === 'failure') console.error('Got failure sending chat.');
+
+    return eventId;
   }
 
-  roomSendMessage(roomId: string, sender: string, txId: string, message: string): string {
-    const room = this.data.rooms[roomId];
-    if (!roomId) throw new Error(`Room does not exist`);
-    const sentAt = Date.now();
-    room.messages.push({
-      message,
-      sender,
-      sentAt,
-      txId,
-    });
-    this.data.save();
-    return roomMessageEventId(roomId, sender, txId, sentAt);
-  }
-
-  roomMessages(
+  async roomMessages(
     roomId: string,
     direction: 'forward' | 'backward',
     from?: string,
     to?: string,
     limit = 10
-  ): { start: string; end?: string; state: IStateEvent[]; chunk: IRoomEvent[] } | undefined {
-    const room = this.data.rooms[roomId];
-    if (!room) return undefined;
-
-    let start: string;
-    if (from) {
-      start = from;
-    } else if (direction === 'forward') {
-      start = room.createdAt.toString();
-    } else {
-      const lastMessage = room.messages[room.messages.length - 1];
-      start = lastMessage ? lastMessage.sentAt.toString() : room.createdAt.toString();
-    }
-    const toN = to && parseInt(to, 10);
-    const startN = parseInt(start, 10);
-
-    let end: string | undefined;
-    const state = this.roomState(roomId);
-
-    if (room.messages.length === 0) {
-      return {
-        start,
-        chunk: [],
-        state,
-      };
-    }
-    let i = direction === 'forward' ? 0 : room.messages.length - 1;
-    const chunk: IRoomEvent[] = [];
-    while (chunk.length <= limit) {
-      const message = room.messages[i];
-      if (!message) break;
-      if (chunk.length === limit) {
-        if (message) {
-          end = message.sentAt.toString();
-        }
-        break;
+  ): Promise<
+    | {
+        start: string;
+        end?: string;
+        state: IStateEvent[];
+        chunk: IRoomEvent[];
+        roomCreatedAt: number;
       }
+    | undefined
+  > {
+    if (!this.m.auth) throw new Error('Not logged in');
+    const store = await this.m.earthPeer.getStore(roomId);
+    if (earthstar.isErr(store)) throw store;
 
-      const startDiff = message.sentAt - startN;
-      const dirn = direction === 'forward' ? 1 : -1;
+    const roomInfo = await store.latestDocAtPath(earthstar.Path.fromStrings('self'));
+    if (earthstar.isErr(roomInfo)) throw roomInfo;
+    if (!roomInfo) return undefined;
 
-      // If this message is within the range that we are looking for
-      if (startDiff * dirn > 0) {
-        const toDiff = toN && toN - message.sentAt;
-        if (toDiff && toDiff * dirn > 0) {
-          end = message.sentAt.toString();
-          break;
-        }
-        chunk.push({
-          type: 'm.room.message',
-          event_id: roomMessageEventId(roomId, message.sender, message.txId, message.sentAt),
-          content: {
-            body: message.message,
-            msgtype: 'm.text',
-          },
-          origin_server_ts: message.sentAt,
-          sender: message.sender,
-          room_id: roomId,
-        });
-      }
+    const start = BigInt(from || roomInfo.timestamp);
+    const until = to ? BigInt(to) : undefined;
 
-      if (direction === 'forward') {
-        i += 1;
-      } else {
-        i -= 1;
-      }
+    const state = await this.roomState(roomId);
+
+    const query = {
+      limit,
+      order: 'timestamp',
+      pathPrefix: earthstar.Path.fromStrings('events'),
+      descending: direction === 'backward',
+      timestampGte: direction === 'forward' ? start : until,
+      timestampLt: direction === 'backward' ? start : until,
+    } as earthstar.Query;
+    const docs = store.queryDocs(query);
+
+    const chunk = [];
+    for await (const doc of docs) {
+      if (!doc.payload) continue;
+      const data = await doc.payload?.bytes();
+      chunk.push(decodeJson(data));
     }
 
-    return { start, chunk, end, state };
+    return { start: start.toString(), chunk, state, roomCreatedAt: Number(roomInfo.timestamp) };
   }
 
   /** Get the direct messages account data for a user */
   accountDataDirect(userId: string): { type: 'm.direct'; content: { [userId: string]: string[] } } {
-    const data: { [userId: string]: string[] } = {};
-    const directRooms = Object.entries(this.data.rooms)
-      .filter(([, room]) => room.direct)
-      .filter(([, room]) => room.members.some((x) => x.id === userId) || room.owner.id === userId);
-
-    for (const [id, room] of directRooms) {
-      if (room.owner.id !== userId) {
-        data[room.owner.id] = [...(data[room.owner.id] || []), id];
-      }
-
-      for (const member of room.members) {
-        if (member.id !== userId) {
-          data[member.id] = [...(data[member.id] || []), id];
-        }
-      }
-    }
-
-    return {
-      type: 'm.direct',
-      content: data,
-    };
+    // const data: { [userId: string]: string[] } = {};
+    // const directRooms = Object.entries(this.data.rooms)
+    //   .filter(([, room]) => room.direct)
+    //   .filter(([, room]) => room.members.some((x) => x.id === userId) || room.owner.id === userId);
+    // for (const [id, room] of directRooms) {
+    //   if (room.owner.id !== userId) {
+    //     data[room.owner.id] = [...(data[room.owner.id] || []), id];
+    //   }
+    //   for (const member of room.members) {
+    //     if (member.id !== userId) {
+    //       data[member.id] = [...(data[member.id] || []), id];
+    //     }
+    //   }
+    // }
+    // return {
+    //   type: 'm.direct',
+    //   // content: data,
+    //   content: {},
+    // };
   }
 }

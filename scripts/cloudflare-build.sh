@@ -7,13 +7,13 @@ npm run build
 cp -r public/* dist/public/
 echo '{
   "client_id": "https://pigeon.muni.town/oauth-client.json",
-  "client_name": "Localhost App",
+  "client_name": "Pigeon",
   "client_uri": "https://pigeon.muni.town",
   "logo_uri": "https://pigeon.muni.town/public/favicon.ico",
   "tos_uri": "https://pigeon.muni.town",
   "policy_uri": "https://pigeon.muni.town",
   "redirect_uris": ["https://pigeon.muni.town/_matrix/custom/oauth/callback"],
-  "scope": "atproto transition:generic",
+  "scope": "atproto transition:generic transition:chat.bsky",
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none",

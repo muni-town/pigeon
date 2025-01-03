@@ -107,11 +107,9 @@ export class PeerjsFrontendManager {
 
         // If the service worker wants us to send data
       } else if (message.type === 'sendData') {
-        console.log('wants to send', message);
         // Get the connection and send it
         const conn = this.connections[message.connectionId];
         if (conn) {
-          console.info('Sending data to ', conn.peer, message.data);
           conn.send(message.data);
         }
       } else if (message.type === 'getPeerId') {
