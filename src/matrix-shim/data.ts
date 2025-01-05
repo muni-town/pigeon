@@ -4,26 +4,28 @@
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable max-classes-per-file */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { ICreateRoomOpts, IRoomEvent, IStateEvent } from 'matrix-js-sdk';
+import { encodeBase64, ICreateRoomOpts, IRoomEvent, IStateEvent } from 'matrix-js-sdk';
 
 import * as earthstar from '@earthstar/earthstar';
 import _ from 'lodash';
 import { ulid } from 'ulidx';
+import { RichText } from '@atproto/api';
 import { MatrixShim } from '.';
 import { resolvePublicKey, urlToMxc } from './resolve';
+import { handleErr } from './earthstarUtils';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-function encodeText(text: string): Uint8Array {
+export function encodeText(text: string): Uint8Array {
   return textEncoder.encode(text);
 }
-function decodeText(binary: Uint8Array): string {
+export function decodeText(binary: Uint8Array): string {
   return textDecoder.decode(binary);
 }
-function encodeJson(data: any): Uint8Array {
+export function encodeJson(data: any): Uint8Array {
   return encodeText(JSON.stringify(data));
 }
-function decodeJson<T>(binary: Uint8Array): T {
+export function decodeJson<T>(binary: Uint8Array): T {
   return JSON.parse(decodeText(binary));
 }
 
@@ -59,6 +61,10 @@ export class MatrixDataWrapper {
     this.m = m;
   }
 
+  async roomIds(): Promise<earthstar.ShareTag[]> {
+    return this.m.earthPeer.shares();
+  }
+
   async createRoom(opts: ICreateRoomOpts): Promise<string> {
     if (!this.m.auth) throw new Error('Not logged in');
 
@@ -67,7 +73,7 @@ export class MatrixDataWrapper {
     const resp = await this.m.auth.agent.getProfiles({
       actors: dids,
     });
-    let members = (
+    const members = (
       await Promise.all(
         _.zip(dids, resp.data.profiles).map(async ([did, profile]) => ({
           id: did!,
@@ -85,25 +91,97 @@ export class MatrixDataWrapper {
     });
 
     // Create a share for the room
-    const share = await this.m.earthPeer.createShare('room', false);
-    if (earthstar.isErr(share)) throw share;
+    const share = handleErr(await this.m.earthPeer.createShare('room', false));
+    const readCap = handleErr(
+      await this.m.earthPeer.mintCap(share.tag, this.m.auth.identity, 'read')
+    );
+    const writeCap = handleErr(
+      await this.m.earthPeer.mintCap(share.tag, this.m.auth.identity, 'write')
+    );
+
+    const roomName =
+      opts.name ||
+      opts.room_alias_name ||
+      (opts.is_direct &&
+        members
+          .slice(1)
+          .map((x) => x.displayname)
+          .filter((x) => !!x)
+          .join(', ')) ||
+      'New Room';
 
     // Mint capability for all room members ( for now all members have full write access )
-    members = await Promise.all(
+    await Promise.all(
       members.map(async (member) => {
-        const cap = await this.m.earthPeer.mintCap(
-          share.tag,
-          member['town.muni.pigeon.publicKey'],
-          'write'
+        if (!this.m.auth) throw new Error('Not logged in');
+        const memberReadCap = handleErr(
+          await readCap.delegate(member['town.muni.pigeon.publicKey'], {
+            identity: member['town.muni.pigeon.publicKey'],
+          })
         );
-        if (earthstar.isErr(cap)) throw cap;
-        return { ...member };
+        const memberWriteCap = handleErr(
+          await writeCap.delegate(member['town.muni.pigeon.publicKey'], {
+            identity: member['town.muni.pigeon.publicKey'],
+          })
+        );
+
+        // The owner doesn't need to invite themselves
+        if (this.m.auth.session.did === member.id) {
+          return;
+        }
+
+        // Create a new invite record on the PDS
+        const inviteId = ulid();
+        const recordResp = await this.m.auth.agent.com.atproto.repo.createRecord({
+          collection: 'town.muni.pigeon.invite',
+          repo: this.m.auth.session.did,
+          rkey: inviteId,
+          record: {
+            $type: 'town.muni.pigeon.invite',
+            readCap: encodeBase64(memberReadCap.export()),
+            writeCap: encodeBase64(memberWriteCap.export()),
+          },
+        });
+        if (!recordResp.success)
+          throw new Error(`Couldn't create invite record on PDS: ${recordResp.data}`);
+
+        // Send the invited member a DM with an invite link
+        const { protocol, host } = globalThis.location;
+        const inviteUrl = `${protocol}//${host}/_matrix/custom/acceptInvite/${this.m.auth.session.did}/${inviteId}`;
+
+        const headers = {
+          headers: {
+            'atproto-proxy': 'did:web:api.bsky.chat#bsky_chat',
+          },
+        };
+        const convoResp = await this.m.auth.agent.chat.bsky.convo.getConvoForMembers(
+          {
+            members: [this.m.auth.session.did, member.id],
+          },
+          headers
+        );
+        if (!convoResp.success) throw new Error('Could not get bsky chat for sending invite');
+        const { convo } = convoResp.data;
+        const rt = new RichText({
+          text: `Invite to Pigeon chatroom: ${inviteUrl}`,
+        });
+        rt.detectFacets(this.m.auth.agent);
+
+        this.m.auth.agent.chat.bsky.convo.sendMessage(
+          {
+            convoId: convo.id,
+            message: {
+              text: rt.text,
+              facets: rt.facets,
+            },
+          },
+          headers
+        );
       })
     );
 
     // Get the room store
-    const store = await this.m.earthPeer.getStore(share.tag);
-    if (earthstar.isErr(store)) throw store;
+    const store = handleErr(await this.m.earthPeer.getStore(share.tag));
 
     // Create a record marking this as a pigeon room
     await store.set({
@@ -161,16 +239,7 @@ export class MatrixDataWrapper {
         event_id: ulid(),
         type: 'm.room.name',
         content: {
-          name:
-            opts.name ||
-            opts.room_alias_name ||
-            (opts.is_direct &&
-              members
-                .slice(1)
-                .map((x) => x.displayname)
-                .filter((x) => !!x)
-                .join(', ')) ||
-            'New Room',
+          name: roomName,
         },
         state_key: '',
         origin_server_ts: Date.now(),
@@ -182,8 +251,7 @@ export class MatrixDataWrapper {
   }
 
   async roomState(roomId: string): Promise<IStateEvent[]> {
-    const store = await this.m.earthPeer.getStore(roomId);
-    if (earthstar.isErr(store)) return [];
+    const store = handleErr(await this.m.earthPeer.getStore(roomId));
 
     const events: IStateEvent[] = [];
 
@@ -207,8 +275,7 @@ export class MatrixDataWrapper {
     content: any
   ): Promise<string> {
     if (!this.m.auth) throw new Error('Not logged in');
-    const store = await this.m.earthPeer.getStore(roomId);
-    if (earthstar.isErr(store)) throw store;
+    const store = handleErr(await this.m.earthPeer.getStore(roomId));
 
     const eventId = ulid();
     const status = await store.set({
@@ -246,11 +313,9 @@ export class MatrixDataWrapper {
     | undefined
   > {
     if (!this.m.auth) throw new Error('Not logged in');
-    const store = await this.m.earthPeer.getStore(roomId);
-    if (earthstar.isErr(store)) throw store;
+    const store = handleErr(await this.m.earthPeer.getStore(roomId));
 
-    const roomInfo = await store.latestDocAtPath(earthstar.Path.fromStrings('self'));
-    if (earthstar.isErr(roomInfo)) throw roomInfo;
+    const roomInfo = handleErr(await store.latestDocAtPath(earthstar.Path.fromStrings('self')));
     if (!roomInfo) return undefined;
 
     const start = BigInt(from || roomInfo.timestamp);
@@ -279,25 +344,25 @@ export class MatrixDataWrapper {
   }
 
   /** Get the direct messages account data for a user */
-  accountDataDirect(userId: string): { type: 'm.direct'; content: { [userId: string]: string[] } } {
-    // const data: { [userId: string]: string[] } = {};
-    // const directRooms = Object.entries(this.data.rooms)
-    //   .filter(([, room]) => room.direct)
-    //   .filter(([, room]) => room.members.some((x) => x.id === userId) || room.owner.id === userId);
-    // for (const [id, room] of directRooms) {
-    //   if (room.owner.id !== userId) {
-    //     data[room.owner.id] = [...(data[room.owner.id] || []), id];
-    //   }
-    //   for (const member of room.members) {
-    //     if (member.id !== userId) {
-    //       data[member.id] = [...(data[member.id] || []), id];
-    //     }
-    //   }
-    // }
-    // return {
-    //   type: 'm.direct',
-    //   // content: data,
-    //   content: {},
-    // };
-  }
+  // accountDataDirect(userId: string): { type: 'm.direct'; content: { [userId: string]: string[] } } {
+  // const data: { [userId: string]: string[] } = {};
+  // const directRooms = Object.entries(this.data.rooms)
+  //   .filter(([, room]) => room.direct)
+  //   .filter(([, room]) => room.members.some((x) => x.id === userId) || room.owner.id === userId);
+  // for (const [id, room] of directRooms) {
+  //   if (room.owner.id !== userId) {
+  //     data[room.owner.id] = [...(data[room.owner.id] || []), id];
+  //   }
+  //   for (const member of room.members) {
+  //     if (member.id !== userId) {
+  //       data[member.id] = [...(data[member.id] || []), id];
+  //     }
+  //   }
+  // }
+  // return {
+  //   type: 'm.direct',
+  //   // content: data,
+  //   content: {},
+  // };
+  // }
 }

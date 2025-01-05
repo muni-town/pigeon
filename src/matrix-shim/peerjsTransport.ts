@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /* eslint-disable max-classes-per-file */
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -95,7 +96,6 @@ export class PeerjsTransport implements Transport {
       if (data.type === 'connClosed' && data.connectionId === t.connId) {
         t.isClosed = true;
       } else if (data.type === 'connData' && data.connectionId === t.connId) {
-        console.info('Transport Recv', data.data);
         t.received.push(data.data as Uint8Array);
       }
     });
@@ -120,7 +120,6 @@ export class PeerjsTransport implements Transport {
   }
 
   async send(bytes: Uint8Array): Promise<void> {
-    console.info('Transport Send', bytes);
     const m: PeerjsBackendMessage = {
       type: 'sendData',
       connectionId: this.connId,
@@ -152,10 +151,10 @@ export class PeerjsTransport implements Transport {
 }
 
 type ConnectHandler = (ev: PeerjsTransport) => unknown;
+type ConnCloseHandler = (ev: { peerId: string; connectionId: string }) => unknown;
+type PeerOpenCloseHandler = (peerId: string) => unknown;
 
-type OpenCloseHandler = (peerId: string) => unknown;
-
-export class PeerjsConnectionManager {
+export class ConnectionManager {
   sender = new BroadcastChannel('matrix-shim-peerjs-backend');
 
   receiver = new BroadcastChannel('matrix-shim-peerjs-frontend');
@@ -164,16 +163,19 @@ export class PeerjsConnectionManager {
 
   transports: PeerjsTransport[] = [];
 
-  peerOpenHandlers: OpenCloseHandler[] = [];
+  peerOpenHandlers: PeerOpenCloseHandler[] = [];
 
-  peerCloseHandlers: OpenCloseHandler[] = [];
+  peerCloseHandlers: PeerOpenCloseHandler[] = [];
 
   peerConnectHandlers: ConnectHandler[] = [];
 
+  connCloseHandlers: ConnCloseHandler[] = [];
+
   constructor(initialHandlers: {
-    peerOpenHandlers?: OpenCloseHandler[];
-    peerCloseHandlers?: OpenCloseHandler[];
+    peerOpenHandlers?: PeerOpenCloseHandler[];
+    peerCloseHandlers?: PeerOpenCloseHandler[];
     peerConnectHandlers?: ConnectHandler[];
+    connCloseHandlers?: ConnCloseHandler[];
   }) {
     if (initialHandlers.peerCloseHandlers)
       this.peerCloseHandlers = initialHandlers.peerCloseHandlers;
@@ -187,11 +189,13 @@ export class PeerjsConnectionManager {
     this.receiver.addEventListener('message', (event) => {
       // eslint-disable-next-line prefer-destructuring
       const message: PeerjsFrontendMessage = event.data;
+      if (message.type !== 'connData') {
+        console.info('PeerJS:', message);
+      }
 
       // Add incoming connections to transport list
       if (message.type === 'incomingConnected') {
         PeerjsTransport.accept(message).then((transport) => {
-          console.info('Accepted peer connection from:', transport.remotePeerId);
           this.transports.push(transport);
 
           for (const handler of this.peerConnectHandlers) {
@@ -201,7 +205,6 @@ export class PeerjsConnectionManager {
 
         // Set current peer ID
       } else if (message.type === 'peerOpened') {
-        console.info('Peer opened:', message.peerId);
         if (message.peerId !== this.peerId) {
           this.peerId = message.peerId;
           for (const handler of this.peerOpenHandlers) {
@@ -221,11 +224,19 @@ export class PeerjsConnectionManager {
 
         // Prune closed connections
       } else if (message.type === 'connClosed') {
+        for (const handler of this.connCloseHandlers) {
+          handler({ peerId: message.peerId, connectionId: message.connectionId });
+        }
         this.transports = this.transports.filter(
           (transport) => transport.connId !== message.connectionId
         );
       }
     });
+  }
+
+  pruneDisconnectedTransports() {
+    this.transports = this.transports.filter((x) => x.isClosed);
+    console.log('transports', this.transports);
   }
 
   async connect(remotePeerId: string): Promise<PeerjsTransport> {

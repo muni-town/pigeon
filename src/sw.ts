@@ -58,7 +58,7 @@ let matrixShimInitError: string | undefined;
 
 // When the app asks for our status, send a response
 channel.onmessage = (ev) => {
-  if (ev.data === 'ready?') {
+  if ('checkReady' in ev.data) {
     if (matrixShim) {
       channel.postMessage({ ready: true });
     } else if (matrixShimInitError) {
@@ -75,12 +75,13 @@ const tryInitMatrix = async () => {
     initializing = (async () => {
       try {
         // Start initializing the matrix shim.
+        console.info('Matrix: initializing...');
         const shim = await MatrixShim.init();
-        console.trace('init finished');
+        console.info('Matrix: initialized');
         matrixShim = shim;
         channel.postMessage({ ready: true });
       } catch (e) {
-        console.trace('init errored');
+        console.info('Matrix: error initializing');
         matrixShimInitError = `${e}`;
         channel.postMessage({ error: e });
         throw e;
@@ -92,12 +93,12 @@ const tryInitMatrix = async () => {
 
 // Immediately activate new service workers.
 self.addEventListener('install', async () => {
-  console.info('Service worker installing...');
+  console.info('Service Worker: installing...');
 
   // Don't wait to install this service worker.
   self.skipWaiting();
 
-  console.info('Service worker done installing');
+  console.info('Service Worker: installed');
 
   // TODO: we may still end up waiting to update if we are currently in the middle of
   // responding to a request in the old service worker. We need to add an abort controller
@@ -106,14 +107,14 @@ self.addEventListener('install', async () => {
 
 // Immediately force all active clients to switch to the new service worker.
 self.addEventListener('activate', async (event) => {
-  console.info('Activating service worker');
+  console.info('Service Worker: activating...');
 
   // Wait until we are certain we are receiving all client fetches.
   event.waitUntil(self.clients.claim());
 
   tryInitMatrix();
 
-  console.info('Service worker activated');
+  console.info('Service Worker: activated');
 });
 
 self.addEventListener('fetch', async (event: FetchEvent) => {
@@ -135,7 +136,7 @@ self.addEventListener('fetch', async (event: FetchEvent) => {
           await tryInitMatrix();
         }
         if (!matrixShim) {
-          return new Response(null, { status: 500, statusText: 'Matrix not ready yet' });
+          return new Response(null, { status: 500, statusText: 'Matrix: not ready yet' });
         }
         return matrixShim.handleRequest(event.request);
       })()

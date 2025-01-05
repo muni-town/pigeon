@@ -14,7 +14,13 @@ import {
   RequestHandler,
   withContent,
 } from 'itty-router';
-import { ICreateRoomOpts, type ILoginParams, type IRoomEvent, type IRooms } from 'matrix-js-sdk';
+import {
+  decodeBase64,
+  ICreateRoomOpts,
+  type ILoginParams,
+  type IRoomEvent,
+  type IRooms,
+} from 'matrix-js-sdk';
 import {
   BrowserOAuthClient,
   OAuthClientMetadataInput,
@@ -28,10 +34,13 @@ import * as earthstar from '@earthstar/earthstar';
 import * as earthstarBrowser from '@earthstar/earthstar/browser';
 import { DataConnection } from 'peerjs';
 import lexicons from './lexicon.json';
-import { MatrixDataWrapper } from './data';
-import { PeerjsConnectionManager } from './peerjsTransport';
+import { decodeJson, MatrixDataWrapper } from './data';
+import { ConnectionManager, PeerjsTransport } from './peerjsTransport';
 import { Notifier } from './notifier';
 import { resolveDidToHandle, urlToMxc } from './resolve';
+import { handleErr } from './earthstarUtils';
+
+const runtime = new earthstar.RuntimeDriverUniversal();
 
 export class MatrixShim {
   clientConfig: { [key: string]: any };
@@ -48,7 +57,7 @@ export class MatrixShim {
     identity: earthstar.IdentityTag;
   };
 
-  connectionManager: PeerjsConnectionManager;
+  connectionManager: ConnectionManager;
 
   webrtcPeerConns: { [did: string]: DataConnection } = {};
 
@@ -64,12 +73,12 @@ export class MatrixShim {
 
   data: MatrixDataWrapper;
 
+  syncers: { [id: string]: earthstar.Syncer } = {};
+
   /**
    * Initialize the MatrixShim.
    */
   static async init(): Promise<MatrixShim> {
-    console.info('Initializing matrix shim');
-
     // Fetch the client Pigeon client configuration JSON
     const clientconfigResp = await fetch('/config.json');
     const clientConfig = await clientconfigResp.json();
@@ -77,7 +86,7 @@ export class MatrixShim {
     // Create a new earthstar peer
     const earthPeer = new earthstar.Peer({
       password: 'password',
-      runtime: new earthstar.RuntimeDriverUniversal(),
+      runtime,
       storage: new earthstarBrowser.StorageDriverIndexedDB(),
     });
 
@@ -119,10 +128,10 @@ export class MatrixShim {
 
     // Try to restore previous session
     const did = await shim.kvdb.get('did');
+    console.error('Previous DID', did);
     if (did) {
-      oauthClient.restore(did).then((x) => {
-        shim.setOauthSession(x);
-      });
+      const session = await oauthClient.restore(did);
+      await shim.setOauthSession(session);
     }
 
     // Add to global scope for easier debugging in the browser console.
@@ -150,34 +159,16 @@ export class MatrixShim {
     this.data = new MatrixDataWrapper(this);
 
     // Whenever a peer is opened, set that PeerId as our current peer ID in our AtProto PDS.
-    this.connectionManager = new PeerjsConnectionManager({
+    this.connectionManager = new ConnectionManager({
       peerOpenHandlers: [
         () => {
           this.setPeerIdRecordInPds();
           this.connectToPeers();
         },
       ],
-      peerConnectHandlers: [
-        (_transport) => {
-          (async () => {
-            // for await (const message of transport) {
-            //   for (const roomId of this.data.roomIds()) {
-            //     const room = this.data.rooms[roomId];
-            //     if (room.direct) {
-            //       if (this.auth) {
-            //         this.data.roomSendMessage(
-            //           roomId,
-            //           room.members[0].id,
-            //           crypto.randomUUID(),
-            //           new TextDecoder().decode(message)
-            //         );
-            //         this.changes.notify();
-            //       }
-            //     }
-            //   }
-            // }
-          })();
-        },
+      peerConnectHandlers: [(transport) => this.addSyncerForTransport(transport)],
+      connCloseHandlers: [
+        ({ peerId, connectionId }) => delete this.syncers[`${peerId}-${connectionId}`],
       ],
     });
 
@@ -189,9 +180,9 @@ export class MatrixShim {
   async setPeerIdRecordInPds() {
     if (this.auth) {
       await this.auth.agent.com.atproto.repo.putRecord({
-        collection: 'peer.pigeon.muni.town',
+        collection: 'town.muni.pigeon.peer',
         record: {
-          $type: 'peer.pigeon.muni.town',
+          $type: 'town.muni.pigeon.peer',
           id: this.connectionManager.peerId,
         },
         repo: this.auth.session.did,
@@ -234,7 +225,7 @@ export class MatrixShim {
     if (this.auth) {
       const record = await this.auth.agent.com.atproto.repo.getRecord(
         {
-          collection: 'peer.pigeon.muni.town',
+          collection: 'town.muni.pigeon.peer',
           repo: did,
           rkey: 'self',
         },
@@ -248,44 +239,34 @@ export class MatrixShim {
   }
 
   /** Connect to all peers */
-  async connectToPeers() {
-    // console.info('Connecting to peers');
-    // const membersList: Set<string> = new Set();
-    // for (const roomId of this.data.roomIds()) {
-    //   const room = this.data.rooms[roomId];
-    //   membersList.add(room.owner.id);
-    //   room.members.forEach((x) => membersList.add(x.id));
-    // }
-    // if (this.auth) membersList.delete(this.auth.session.did);
-    // console.log('Peer dids:', membersList);
-    // const ids = await Promise.all(
-    //   [...membersList.values()].map(async (x) => [x, await this.getPeerIdForDid(x)])
-    // );
-    // console.log('Peer ids:', ids);
-    // for (const [did, peerId] of ids) {
-    //   if (peerId) {
-    //     console.info('Connecting to peer', peerId);
-    //     const transport = await this.connectionManager.connect(peerId);
-    //     (async () => {
-    //       for await (const message of transport) {
-    //         for (const roomId of this.data.roomIds()) {
-    //           const room = this.data.rooms[roomId];
-    //           if (room.direct && room.members.some((x) => x.id === did)) {
-    //             if (this.auth) {
-    //               this.data.roomSendMessage(
-    //                 roomId,
-    //                 did!,
-    //                 crypto.randomUUID(),
-    //                 new TextDecoder().decode(message)
-    //               );
-    //               this.changes.notify();
-    //             }
-    //           }
-    //         }
-    //       }
-    //     })();
-    //   }
-    // }
+  async connectToPeers(extraPeers: string[] = []) {
+    const membersList: Set<string> = new Set(extraPeers);
+
+    for (const roomId of await this.data.roomIds()) {
+      const state = await this.data.roomState(roomId);
+      for (const ev of state) {
+        if (ev.type === 'm.room.member') {
+          const id = ev.sender;
+          if (ev.content.membership === 'join') {
+            membersList.add(id);
+          } else if (ev.content.membership === 'leave') {
+            membersList.delete(id);
+          }
+        }
+      }
+    }
+    if (this.auth) membersList.delete(this.auth.session.did);
+
+    console.log('Connect to Peers:', membersList);
+    const ids = await Promise.all(
+      [...membersList.values()].map(async (x) => [x, await this.getPeerIdForDid(x)])
+    );
+    for (const [, peerId] of ids) {
+      if (peerId) {
+        const transport = await this.connectionManager.connect(peerId);
+        this.addSyncerForTransport(transport);
+      }
+    }
   }
 
   /** Build the matrix API routes. */
@@ -454,7 +435,9 @@ export class MatrixShim {
 
     router.get('/_matrix/client/v3/user/:userId/account_data/:type', async ({ params }) => {
       if (params.type === 'm.direct') {
-        return this.data.accountDataDirect(params.userId);
+        // TODO: return account data
+        return {};
+        // return this.data.accountDataDirect(params.userId);
       }
       return error(404);
     });
@@ -470,6 +453,39 @@ export class MatrixShim {
 
     router.put('/_matrix/client/v3/rooms/:roomId/typing/:userId', () => ({}));
     router.post('/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId', () => ({}));
+
+    router.get('/_matrix/custom/acceptInvite/:did/:code', async ({ params }) => {
+      if (!this.auth) return error(403, 'Not logged in');
+
+      let { did } = params;
+      const { code } = params;
+      did = decodeURIComponent(did);
+
+      // Get the invite info from the PDS
+      const recordResp = await this.auth.agent.com.atproto.repo.getRecord(
+        {
+          collection: 'town.muni.pigeon.invite',
+          repo: did,
+          rkey: code,
+        },
+        { headers: { 'atproto-proxy': `${did}#atproto_pds` } }
+      );
+
+      // Parse the invite
+      const inviteData = recordResp.data.value as { readCap: string; writeCap: string };
+
+      // Load the capabilities
+      const cap = handleErr(await this.earthPeer.importCap(decodeBase64(inviteData.readCap)));
+      handleErr(await this.earthPeer.importCap(decodeBase64(inviteData.writeCap)));
+
+      const roomUrl = new URL(globalThis.location.href);
+      roomUrl.pathname = `/home/${cap.share}`;
+      roomUrl.search = '';
+      roomUrl.hash = '';
+
+      this.changes.notify();
+      return new Response(null, { status: 307, headers: [['location', roomUrl.href]] });
+    });
 
     router.put(
       '/_matrix/client/v3/rooms/:roomId/send/:type/:txId',
@@ -490,6 +506,8 @@ export class MatrixShim {
     router.get('/_matrix/client/v3/sync', async ({ query }) => {
       const since = query.since?.toString() || '0';
       const timeout = parseInt(query.timeout?.toString() || '0', 10);
+
+      this.connectToPeers();
 
       const rooms: IRooms = {
         invite: {},
@@ -555,5 +573,35 @@ export class MatrixShim {
    */
   async handleRequest(request: Request): Promise<Response> {
     return this.router.fetch(request);
+  }
+
+  async addSyncerForTransport(transport: PeerjsTransport) {
+    const syncer = new earthstar.Syncer({
+      auth: this.earthPeer.auth,
+      getStore(share) {
+        return this.getStore(share);
+      },
+      interests: await this.earthPeer.auth.interestsFromCaps(),
+      maxPayloadSizePower: 4,
+      runtime,
+      transport,
+    });
+    this.syncers[`${transport.peerId}-${transport.connId}`] = syncer;
+  }
+
+  async debugDump() {
+    const data: { [key: string]: any } = {};
+    for (const roomId of await this.data.roomIds()) {
+      const store = await this.earthPeer.getStore(roomId);
+      if (earthstar.isErr(store)) throw store;
+      const storeDump: { [key: string]: any } = {};
+      for await (const doc of store.documents()) {
+        const key = doc.path.asStrings()!.join('/');
+        storeDump[key] = decodeJson(await doc.payload!.bytes());
+      }
+      data[roomId] = storeDump;
+    }
+
+    console.info(data);
   }
 }

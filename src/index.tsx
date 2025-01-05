@@ -48,7 +48,7 @@ const renderError = (error: string) => {
 // Register Service Worker
 if ('serviceWorker' in navigator) {
   const serviceWorkerReady = new BroadcastChannel('service-worker-ready');
-  serviceWorkerReady.postMessage('ready?');
+  serviceWorkerReady.postMessage({ checkReady: true });
 
   const swUrl =
     import.meta.env.MODE === 'production'
@@ -65,7 +65,7 @@ if ('serviceWorker' in navigator) {
   });
 
   serviceWorkerReady.addEventListener('message', (ev) => {
-    console.log('Service worker ready message:', ev.data);
+    console.log('Service Worker:', ev.data);
     // If the service worker is ready, render the app
     if ('ready' in ev.data) {
       renderApp();

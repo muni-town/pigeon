@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import Peer, { DataConnection } from 'peerjs';
 
 export type PeerjsFrontendMessage =
@@ -30,8 +31,8 @@ export class PeerjsFrontendManager {
   constructor() {
     this.peer = new Peer();
     this.peer.on('open', (id) => {
-      console.info('Peer opened:', id);
       const message: PeerjsFrontendMessage = { type: 'peerOpened', peerId: id };
+      console.log('PeerJS:', message);
       this.sender.postMessage(message);
     });
 
@@ -44,31 +45,32 @@ export class PeerjsFrontendManager {
 
     // When we receive a connection from outside
     this.peer.on('connection', (conn) => {
-      this.addConnectionDataCloseHandlers(conn);
+      conn.on('open', () => {
+        this.addConnectionDataCloseHandlers(conn);
 
-      console.info('Incomming peer connection', conn);
+        // Add the connection to the list
+        this.connections[conn.connectionId] = conn;
 
-      // Add the connection to the list
-      this.connections[conn.connectionId] = conn;
-
-      // And send a connected event to the service worker
-      const m: PeerjsFrontendMessage = {
-        type: 'incomingConnected',
-        peerId: this.peer.id,
-        connId: conn.connectionId,
-        remotePeerId: conn.peer,
-      };
-      this.sender.postMessage(m);
+        // And send a connected event to the service worker
+        const m: PeerjsFrontendMessage = {
+          type: 'incomingConnected',
+          peerId: this.peer.id,
+          connId: conn.connectionId,
+          remotePeerId: conn.peer,
+        };
+        console.info(m);
+        this.sender.postMessage(m);
+      });
     });
 
     // When the peer closes
     this.peer.on('close', () => {
-      console.info('Peer closed');
       // Tell the service worker
       const m: PeerjsFrontendMessage = {
         type: 'peerClosed',
         peerId: this.peer.id,
       };
+      console.info(m);
       this.sender.postMessage(m);
     });
 
@@ -84,15 +86,12 @@ export class PeerjsFrontendManager {
         // good.
 
         // Create the connection
-        console.info('Connecting to peer:', message.remotePeerId);
         const conn = this.peer.connect(message.remotePeerId, { reliable: true });
-        console.info('Conencted to peer:', conn.peer, conn);
 
         this.connections[conn.connectionId] = conn;
 
         // When the connection opens
         conn.on('open', () => {
-          console.info('Connection opened', conn.connectionId);
           // Tell the service worker the connection has opened.
           const m: PeerjsFrontendMessage = {
             type: 'connOpened',
@@ -100,6 +99,7 @@ export class PeerjsFrontendManager {
             connectionId: conn.connectionId,
             transportId: message.transportId,
           };
+          console.info(m);
           this.sender.postMessage(m);
         });
 
@@ -133,7 +133,6 @@ export class PeerjsFrontendManager {
 
     // When the connection has data
     conn.on('data', (data) => {
-      console.info('Connection data', conn.connectionId, data);
       // Tell the service worker the connection has opened.
       const m: PeerjsFrontendMessage = {
         type: 'connData',
@@ -153,6 +152,7 @@ export class PeerjsFrontendManager {
         peerId: this.peer.id,
         connectionId: conn.connectionId,
       };
+      console.info(m);
       this.sender.postMessage(m);
     });
   }
