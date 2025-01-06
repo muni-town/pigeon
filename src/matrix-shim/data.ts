@@ -110,19 +110,31 @@ export class MatrixDataWrapper {
           .join(', ')) ||
       'New Room';
 
+    // Create capability for the sync server
+    const { publicKey: serverId } = (await (
+      await fetch(`${this.m.clientConfig.syncServer}/id`)
+    ).json()) as {
+      publicKey: string;
+    };
+    const serverReadCap = handleErr(await readCap.delegate(serverId));
+    const serverWriteCap = handleErr(await writeCap.delegate(serverId));
+    // Send capability to the sync server
+    await fetch(
+      `${this.m.clientConfig.syncServer}/addRoom/${encodeURIComponent(
+        encodeBase64(serverReadCap.export())
+      )}/${encodeURIComponent(encodeBase64(serverWriteCap.export()))}`
+    );
+
     // Mint capability for all room members ( for now all members have full write access )
     await Promise.all(
       members.map(async (member) => {
         if (!this.m.auth) throw new Error('Not logged in');
         const memberReadCap = handleErr(
-          await readCap.delegate(member['town.muni.pigeon.publicKey'], {
-            identity: member['town.muni.pigeon.publicKey'],
-          })
+          await readCap.delegate(member['town.muni.pigeon.publicKey'])
         );
         const memberWriteCap = handleErr(
-          await writeCap.delegate(member['town.muni.pigeon.publicKey'], {
-            identity: member['town.muni.pigeon.publicKey'],
-          })
+          // TODO: only allow writing to their own subspace
+          await writeCap.delegate(member['town.muni.pigeon.publicKey'])
         );
 
         // The owner doesn't need to invite themselves

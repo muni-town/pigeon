@@ -35,7 +35,7 @@ import * as earthstarBrowser from '@earthstar/earthstar/browser';
 import { DataConnection } from 'peerjs';
 import lexicons from './lexicon.json';
 import { decodeJson, MatrixDataWrapper } from './data';
-import { ConnectionManager, PeerjsTransport } from './peerjsTransport';
+// import { ConnectionManager, PeerjsTransport } from './peerjsTransport';
 import { Notifier } from './notifier';
 import { resolveDidToHandle, urlToMxc } from './resolve';
 import { handleErr } from './earthstarUtils';
@@ -57,7 +57,7 @@ export class MatrixShim {
     identity: earthstar.IdentityTag;
   };
 
-  connectionManager: ConnectionManager;
+  // connectionManager: ConnectionManager;
 
   webrtcPeerConns: { [did: string]: DataConnection } = {};
 
@@ -72,6 +72,8 @@ export class MatrixShim {
   kvdb: KVSIndexedDB<{ did: string | undefined }>;
 
   data: MatrixDataWrapper;
+
+  serverSyncer?: earthstar.Syncer;
 
   syncers: { [id: string]: earthstar.Syncer } = {};
 
@@ -118,12 +120,15 @@ export class MatrixShim {
       allowHttp: true,
     });
 
+    const serverSyncer = handleErr(await earthPeer.syncHttp(`${clientConfig.syncServer}/sync`));
+
     const shim = new MatrixShim(
       clientConfig,
       earthPeer,
       sessionId,
       oauthClient,
-      await kvsIndexedDB({ name: 'matrix-shim', version: 1 })
+      await kvsIndexedDB({ name: 'matrix-shim', version: 1 }),
+      serverSyncer
     );
 
     // Try to restore previous session
@@ -140,6 +145,12 @@ export class MatrixShim {
     return shim;
   }
 
+  async syncWithServer() {
+    if (this.serverSyncer) {
+      this.serverSyncer.forceReconcile();
+    }
+  }
+
   /**
    * Crate the MatrixShim object.
    */
@@ -148,7 +159,8 @@ export class MatrixShim {
     earthPeer: earthstar.Peer,
     sessionId: string,
     oauthClient: BrowserOAuthClient,
-    kvdb: KVSIndexedDB<{ did: string | undefined }>
+    kvdb: KVSIndexedDB<{ did: string | undefined }>,
+    serverSyncer: earthstar.Syncer
   ) {
     this.clientConfig = clientConfig;
     this.earthPeer = earthPeer;
@@ -157,39 +169,43 @@ export class MatrixShim {
     this.changes = new Notifier('matrix');
     this.kvdb = kvdb;
     this.data = new MatrixDataWrapper(this);
+    this.serverSyncer = serverSyncer;
 
-    // Whenever a peer is opened, set that PeerId as our current peer ID in our AtProto PDS.
-    this.connectionManager = new ConnectionManager({
-      peerOpenHandlers: [
-        () => {
-          this.setPeerIdRecordInPds();
-          this.connectToPeers();
-        },
-      ],
-      peerConnectHandlers: [(transport) => this.addSyncerForTransport(transport)],
-      connCloseHandlers: [
-        ({ peerId, connectionId }) => delete this.syncers[`${peerId}-${connectionId}`],
-      ],
-    });
+    // TODO: we need a way to detect updates from the server.
+    setInterval(() => this.changes.notify(), 2000);
+
+    // // Whenever a peer is opened, set that PeerId as our current peer ID in our AtProto PDS.
+    // this.connectionManager = new ConnectionManager({
+    //   peerOpenHandlers: [
+    //     () => {
+    //       this.setPeerIdRecordInPds();
+    //       this.connectToPeers();
+    //     },
+    //   ],
+    //   peerConnectHandlers: [(transport) => this.addSyncerForTransport(transport)],
+    //   connCloseHandlers: [
+    //     ({ peerId, connectionId }) => delete this.syncers[`${peerId}-${connectionId}`],
+    //   ],
+    // });
 
     this.router = this.buildRouter();
 
-    this.connectToPeers();
+    // this.connectToPeers();
   }
 
-  async setPeerIdRecordInPds() {
-    if (this.auth) {
-      await this.auth.agent.com.atproto.repo.putRecord({
-        collection: 'town.muni.pigeon.peer',
-        record: {
-          $type: 'town.muni.pigeon.peer',
-          id: this.connectionManager.peerId,
-        },
-        repo: this.auth.session.did,
-        rkey: 'self',
-      });
-    }
-  }
+  // async setPeerIdRecordInPds() {
+  //   if (this.auth) {
+  //     await this.auth.agent.com.atproto.repo.putRecord({
+  //       collection: 'town.muni.pigeon.peer',
+  //       record: {
+  //         $type: 'town.muni.pigeon.peer',
+  //         id: this.connectionManager.peerId,
+  //       },
+  //       repo: this.auth.session.did,
+  //       rkey: 'self',
+  //     });
+  //   }
+  // }
 
   /**
    * Set the current oauth session.
@@ -218,7 +234,7 @@ export class MatrixShim {
       session,
     };
 
-    this.connectToPeers();
+    // this.connectToPeers();
   }
 
   async getPeerIdForDid(did: string): Promise<string | undefined> {
@@ -263,8 +279,9 @@ export class MatrixShim {
     );
     for (const [, peerId] of ids) {
       if (peerId) {
-        const transport = await this.connectionManager.connect(peerId);
-        this.addSyncerForTransport(transport);
+        throw new Error('TODO');
+        // const transport = await this.connectionManager.connect(peerId);
+        // this.addSyncerForTransport(transport);
       }
     }
   }
@@ -447,7 +464,8 @@ export class MatrixShim {
       const roomId = await this.data.createRoom(opts);
 
       this.changes.notify();
-      this.connectToPeers();
+      this.syncWithServer();
+      // this.connectToPeers();
       return { room_id: roomId };
     });
 
@@ -496,6 +514,7 @@ export class MatrixShim {
         const eventId = await this.data.roomSendMessage(roomId, params.type, params.txid, content);
 
         this.changes.notify();
+        this.syncWithServer();
 
         return {
           event_id: eventId,
@@ -507,7 +526,8 @@ export class MatrixShim {
       const since = query.since?.toString() || '0';
       const timeout = parseInt(query.timeout?.toString() || '0', 10);
 
-      this.connectToPeers();
+      // this.connectToPeers();
+      this.syncWithServer();
 
       const rooms: IRooms = {
         invite: {},
@@ -575,21 +595,22 @@ export class MatrixShim {
     return this.router.fetch(request);
   }
 
-  async addSyncerForTransport(transport: PeerjsTransport) {
-    const syncer = new earthstar.Syncer({
-      auth: this.earthPeer.auth,
-      getStore(share) {
-        return this.getStore(share);
-      },
-      interests: await this.earthPeer.auth.interestsFromCaps(),
-      maxPayloadSizePower: 4,
-      runtime,
-      transport,
-    });
-    this.syncers[`${transport.peerId}-${transport.connId}`] = syncer;
-  }
+  // async addSyncerForTransport(transport: PeerjsTransport) {
+  //   const syncer = new earthstar.Syncer({
+  //     auth: this.earthPeer.auth,
+  //     getStore(share) {
+  //       return this.getStore(share);
+  //     },
+  //     interests: await this.earthPeer.auth.interestsFromCaps(),
+  //     maxPayloadSizePower: 4,
+  //     runtime,
+  //     transport,
+  //   });
+  //   this.syncers[`${transport.peerId}-${transport.connId}`] = syncer;
+  // }
 
-  async debugDump() {
+  /** Debug dump. */
+  async d() {
     const data: { [key: string]: any } = {};
     for (const roomId of await this.data.roomIds()) {
       const store = await this.earthPeer.getStore(roomId);

@@ -1,4 +1,5 @@
 {
+  "syncServer": "http://localhost:8000",
   "defaultHomeserver": 0,
   "homeserverList": ["pigeon"],
   "allowCustomHomeservers": false,

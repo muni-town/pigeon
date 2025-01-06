@@ -17,7 +17,7 @@ import App from './app/pages/App';
 
 // import i18n (needs to be bundled ;))
 import './app/i18n';
-import { PeerjsFrontendManager } from './matrix-shim/peerjsFrontend';
+// import { PeerjsFrontendManager } from './matrix-shim/peerjsFrontend';
 
 document.body.classList.add(configClass, varsClass);
 settings.applyTheme();
@@ -43,7 +43,7 @@ const renderError = (error: string) => {
   );
 };
 
-(globalThis as any).peerManager = new PeerjsFrontendManager();
+// (globalThis as any).peerManager = new PeerjsFrontendManager();
 
 // Register Service Worker
 if ('serviceWorker' in navigator) {
